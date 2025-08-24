@@ -29,6 +29,7 @@ uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
 toml = "0.8"
 
+
 # Crypto and Random
 rand = "0.8"
 

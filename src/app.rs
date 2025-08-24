@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
+use rand::prelude::*;
 
 use crate::channels::{ChannelManager, Message, Channel};
 use crate::nostr::{NostrClient, Identity};
@@ -26,6 +27,7 @@ pub struct App {
     pub input: String,
     pub cursor_position: usize,
     pub scroll_offset: usize,
+    pub should_autoscroll: bool,
     
     // Nostr client
     pub nostr_client: NostrClient,
@@ -74,6 +76,7 @@ impl App {
             input: String::new(),
             cursor_position: 0,
             scroll_offset: 0,
+            should_autoscroll: true,
             
             nostr_client,
             identity,
@@ -149,15 +152,23 @@ impl App {
                         if self.scroll_offset > 0 {
                             self.scroll_offset -= 1;
                         }
+                        // User scrolled up, disable auto-scrolling
+                        self.should_autoscroll = false;
                     }
                     KeyCode::Down => {
                         self.scroll_offset += 1;
+                        // Check if user scrolled to bottom
+                        self.update_autoscroll_status();
                     }
                     KeyCode::PageUp => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                        // User scrolled up, disable auto-scrolling
+                        self.should_autoscroll = false;
                     }
                     KeyCode::PageDown => {
                         self.scroll_offset += 10;
+                        // Check if user scrolled to bottom
+                        self.update_autoscroll_status();
                     }
                     _ => {}
                 }
@@ -268,6 +279,9 @@ impl App {
             self.add_status_message("No channel selected. Use /join <geohash> to join a channel.".to_string());
         }
         
+        // Enable auto-scrolling after sending a message
+        self.should_autoscroll = true;
+        
         Ok(())
     }
     
@@ -318,6 +332,27 @@ impl App {
             "all" => {
                 self.show_all_recent_messages().await;
             }
+            "hug" => {
+                if parts.len() != 2 {
+                    self.add_status_message("Usage: /hug <nickname>".to_string());
+                    return Ok(());
+                }
+                let nickname = parts[1];
+                let hug_message = format!("* {} hugs {} 🫂", self.identity.nickname, nickname);
+                self.send_action_message(&hug_message).await?;
+            }
+            "slap" => {
+                if parts.len() != 2 {
+                    self.add_status_message("Usage: /slap <nickname>".to_string());
+                    return Ok(());
+                }
+                let nickname = parts[1];
+                let slap_message = format!("* {} slaps {} around a bit with a large trout", self.identity.nickname, nickname);
+                self.send_action_message(&slap_message).await?;
+            }
+            "version" => {
+                self.show_version();
+            }
             "help" | "h" | "commands" => {
                 self.add_status_message("Help command received!".to_string());
                 self.show_help().await;
@@ -345,6 +380,10 @@ impl App {
         self.nostr_client.subscribe_to_channel(geohash).await?;
         
         self.add_status_message(format!("Joined channel #{}", geohash));
+        
+        // Enable auto-scrolling when joining a channel
+        self.should_autoscroll = true;
+        
         Ok(())
     }
     
@@ -380,6 +419,10 @@ impl App {
         };
         
         self.channel_manager.add_message(message).await;
+        
+        // Enable auto-scrolling after sending a message
+        self.should_autoscroll = true;
+        
         Ok(())
     }
     
@@ -479,6 +522,9 @@ impl App {
             "/nick, /n <nickname> - Change your display name (session only)".to_string(),
             "/list, /channels - List joined channels".to_string(),
             "/all - Show recent activity from all channels (last 10 minutes)".to_string(),
+            "/hug <nickname> - Send a hug to someone 🫂".to_string(),
+            "/slap <nickname> - Slap someone with a large trout".to_string(),
+            "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
             "".to_string(),
@@ -520,8 +566,15 @@ impl App {
     
     pub async fn on_tick(&mut self) -> Result<()> {
         // Process incoming messages
+        let mut new_messages_count = 0;
         while let Ok(message) = self.message_rx.try_recv() {
             self.channel_manager.add_message(message).await;
+            new_messages_count += 1;
+        }
+        
+        // Auto-scroll to bottom if we received new messages and should auto-scroll
+        if new_messages_count > 0 && self.should_autoscroll {
+            self.scroll_to_bottom();
         }
         
         // Process status updates
@@ -674,14 +727,22 @@ impl App {
         if let Some((_, start_pos, end_pos)) = self.find_current_word() {
             let replacement = &state.matches[state.current_match_index];
             
-            // Replace the current word with the completion + ": "
+            // Check if we're in a slash command context
+            let is_slash_command_context = self.is_slash_command_context(start_pos);
+            
+            // Replace the current word with the completion
             let mut chars: Vec<char> = self.input.chars().collect();
             
             // Remove old word
             chars.drain(start_pos..end_pos);
             
-            // Insert completion + ": "
-            let replacement_with_suffix = format!("{}: ", replacement);
+            // Only add ": " if this is NOT a slash command context
+            let replacement_with_suffix = if is_slash_command_context {
+                replacement.to_string()
+            } else {
+                format!("{}: ", replacement)
+            };
+            
             let replacement_chars: Vec<char> = replacement_with_suffix.chars().collect();
             for (i, &ch) in replacement_chars.iter().enumerate() {
                 chars.insert(start_pos + i, ch);
@@ -689,6 +750,107 @@ impl App {
             
             self.input = chars.iter().collect();
             self.cursor_position = start_pos + replacement_with_suffix.len();
+        }
+    }
+    
+    async fn send_action_message(&mut self, action: &str) -> Result<()> {
+        if let Some(channel) = &self.current_channel {
+            if channel == "system" {
+                self.add_status_message("Cannot send actions to system channel".to_string());
+                return Ok(());
+            }
+            
+            // Create an action message (similar to regular message but marked as action)
+            let message = Message {
+                channel: channel.clone(),
+                nickname: self.identity.nickname.clone(),
+                content: action.to_string(),
+                timestamp: chrono::Utc::now(),
+                pubkey: Some(self.identity.pubkey.clone()),
+                is_own: true,
+            };
+            
+            // Send to Nostr
+            self.nostr_client.send_message(channel, action, &self.identity.nickname).await?;
+            
+            // Add local echo
+            self.channel_manager.add_message_sync(message);
+        } else {
+            self.add_status_message("No channel selected".to_string());
+        }
+        Ok(())
+    }
+    
+    fn show_version(&mut self) {
+        let version = env!("CARGO_PKG_VERSION");
+        let quotes = vec![
+            "The purple pill helps the orange pill go down.",
+            "Nostr is the protocol that binds all of your applications together.",
+            "GM. PV.",
+            "Nost fixes this.",
+            "Decentralized social media is not a bug, it's a feature.",
+            "My keys, my keys, my kingdom for my keys!",
+            "Relays gonna relay.",
+            "In Nostr we trust.",
+            "Kind 1 is the message, kind 3 is the medium.",
+            "To the moon!",
+            "Not your keys, not your crypto.",
+            "Web5 is just Nostr with extra steps.",
+        ];
+        
+        let random_quote = quotes[rand::random::<usize>() % quotes.len()];
+        
+        let version_message = format!(
+            "Running BitchatX version {} by Derek Ross. {}", 
+            version, random_quote
+        );
+        
+        self.add_status_message(version_message);
+    }
+    
+    fn is_slash_command_context(&self, word_start_pos: usize) -> bool {
+        // Check if the word being completed is part of a slash command
+        let chars: Vec<char> = self.input.chars().collect();
+        let word_start = word_start_pos.min(chars.len());
+        
+        // Look backwards from word start to find if there's a slash
+        let mut pos = word_start;
+        while pos > 0 {
+            pos -= 1;
+            let ch = chars[pos];
+            
+            if ch == '/' {
+                return true; // Found a slash before this word
+            } else if ch.is_whitespace() {
+                continue; // Keep looking for slash
+            } else {
+                break; // Found non-whitespace, non-slash character
+            }
+        }
+        
+        false
+    }
+    
+    fn scroll_to_bottom(&mut self) {
+        if let Some(channel) = self.get_current_channel() {
+            let message_count = channel.messages.len();
+            if message_count > 0 {
+                // Set scroll_offset to show bottom messages
+                // This will be handled by get_visible_messages logic
+                self.scroll_offset = message_count.saturating_sub(1);
+            }
+        }
+    }
+    
+    fn update_autoscroll_status(&mut self) {
+        if let Some(channel) = self.get_current_channel() {
+            let message_count = channel.messages.len();
+            let visible_height = 20; // Approximate visible message count
+            
+            // If we're near bottom, re-enable auto-scrolling
+            if self.scroll_offset >= message_count.saturating_sub(visible_height) {
+                self.should_autoscroll = true;
+            }
         }
     }
 }

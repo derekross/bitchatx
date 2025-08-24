@@ -66,15 +66,15 @@ impl Channel {
         
         // Insert message in timestamp order (newer messages at the end)
         let insert_pos = self.messages.binary_search_by(|existing| {
-            message.timestamp.cmp(&existing.timestamp)
+            existing.timestamp.cmp(&message.timestamp)
         }).unwrap_or_else(|e| e);
         
         self.messages.insert(insert_pos, message);
         self.last_activity = now;
         
-        // Keep only last 1000 messages per channel (remove oldest from end)
+        // Keep only last 1000 messages per channel (remove oldest from beginning)
         if self.messages.len() > 1000 {
-            self.messages.pop();  // Remove oldest message from end
+            self.messages.remove(0);  // Remove oldest message from beginning (newest are at beginning)
         }
         
         // Clean up inactive participants (not seen for 1 hour)
