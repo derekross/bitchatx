@@ -1,6 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use std::collections::HashMap;
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use tokio::sync::mpsc;
 
 use crate::channels::{ChannelManager, Message, Channel};

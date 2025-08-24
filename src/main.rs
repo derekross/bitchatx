@@ -1,23 +1,17 @@
 use anyhow::Result;
 use clap::{Arg, Command};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph},
-    Frame, Terminal,
+    backend::{Backend, CrosstermBackend}, Terminal,
 };
 use std::{
     io,
     time::{Duration, Instant},
 };
-use tokio::time::timeout;
 
 mod app;
 mod channels;

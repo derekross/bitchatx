@@ -1,11 +1,5 @@
-use anyhow::Result;
-use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use tokio::sync::mpsc;
-use uuid::Uuid;
 
-use crate::channels::Message;
 
 pub use identity::Identity;
 pub use client::NostrClient;
