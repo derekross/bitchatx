@@ -142,6 +142,9 @@ impl App {
                     KeyCode::Char('i') => {
                         self.input_mode = InputMode::Editing;
                     }
+                    KeyCode::Tab => {
+                        self.switch_to_next_channel();
+                    }
                     KeyCode::Up => {
                         if self.scroll_offset > 0 {
                             self.scroll_offset -= 1;
@@ -432,7 +435,8 @@ impl App {
             "Keyboard Commands:".to_string(),
             "i - Enter input mode, Esc - Exit to normal mode, q - Quit (normal mode)".to_string(),
             "Input mode: Stay in input mode after sending messages, only Esc exits".to_string(),
-            "Tab - Nickname completion (input mode), Up/Down - Scroll messages".to_string(),
+            "Tab - Nickname completion (input mode), Switch channels (normal mode)".to_string(),
+            "Channel switching: Esc then Tab to cycle through channels".to_string(),
             "Page Up/Down - Fast scroll, Home/End - Cursor start/end".to_string(),
         ];
         
@@ -482,6 +486,49 @@ impl App {
             self.channel_manager.get_channel(channel_name)
         } else {
             None
+        }
+    }
+    
+    fn get_all_channels(&self) -> Vec<String> {
+        let mut channels = Vec::new();
+        
+        // Always include system channel first
+        channels.push(self.system_channel.clone());
+        
+        // Add joined channels (excluding system channel to avoid duplication)
+        let joined_channels = self.channel_manager.list_channels();
+        for channel in joined_channels {
+            if channel != self.system_channel {
+                channels.push(channel);
+            }
+        }
+        
+        channels
+    }
+    
+    fn switch_to_next_channel(&mut self) {
+        let all_channels = self.get_all_channels();
+        if all_channels.len() <= 1 {
+            return; // No other channels to switch to
+        }
+        
+        if let Some(current) = &self.current_channel {
+            if let Some(current_index) = all_channels.iter().position(|ch| ch == current) {
+                let next_index = (current_index + 1) % all_channels.len();
+                self.current_channel = Some(all_channels[next_index].clone());
+                
+                // Add status message about channel switch
+                let new_channel = &all_channels[next_index];
+                if new_channel == "system" {
+                    self.add_status_message("Switched to system channel".to_string());
+                } else {
+                    self.add_status_message(format!("Switched to channel #{}", new_channel));
+                }
+            }
+        } else {
+            // If no current channel, switch to first channel (system)
+            self.current_channel = Some(all_channels[0].clone());
+            self.add_status_message("Switched to system channel".to_string());
         }
     }
     
