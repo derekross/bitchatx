@@ -316,7 +316,7 @@ impl App {
                 self.list_channels();
             }
             "all" => {
-                self.list_all_channels();
+                self.show_all_recent_messages().await;
             }
             "help" | "h" | "commands" => {
                 self.add_status_message("Help command received!".to_string());
@@ -419,6 +419,57 @@ impl App {
         }
     }
     
+    async fn show_all_recent_messages(&mut self) {
+        let ten_minutes_ago = chrono::Utc::now() - chrono::Duration::minutes(10);
+        let all_channels = self.get_all_channels();
+        
+        // Collect all recent messages first to avoid borrow issues
+        let mut recent_activity: Vec<(String, Vec<String>)> = Vec::new();
+        
+        for channel_name in all_channels {
+            if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
+                let recent_messages: Vec<String> = channel.messages
+                    .iter()
+                    .filter(|msg| msg.timestamp >= ten_minutes_ago)
+                    .map(|msg| {
+                        let timestamp = msg.timestamp.format("%H:%M:%S");
+                        format!("[{}] <{}> {}", timestamp, msg.nickname, msg.content)
+                    })
+                    .collect();
+                
+                if !recent_messages.is_empty() {
+                    recent_activity.push((channel_name, recent_messages));
+                }
+            }
+        }
+        
+        // Now add all status messages
+        self.add_status_message("=== Recent Activity (Last 10 Minutes) ===".to_string());
+        
+        if recent_activity.is_empty() {
+            self.add_status_message("No recent activity in any channel (last 10 minutes)".to_string());
+        } else {
+            for (channel_name, messages) in recent_activity {
+                // Channel header
+                if channel_name == "system" {
+                    self.add_status_message("--- System Channel ---".to_string());
+                } else {
+                    self.add_status_message(format!("--- Channel #{} ---", channel_name));
+                }
+                
+                // Show recent messages
+                for message in messages {
+                    self.add_status_message(message);
+                }
+                
+                // Add separator between channels
+                self.add_status_message("".to_string());
+            }
+            
+            self.add_status_message("=== End of Recent Activity ===".to_string());
+        }
+    }
+    
     async fn show_help(&mut self) {
         let help_text = vec![
             "BitchatX Commands:".to_string(),
@@ -427,7 +478,7 @@ impl App {
             "/msg, /m <channel> <message> - Send message to specific channel".to_string(),
             "/nick, /n <nickname> - Change your display name (session only)".to_string(),
             "/list, /channels - List joined channels".to_string(),
-            "/all - List all channels (joined + listening)".to_string(),
+            "/all - Show recent activity from all channels (last 10 minutes)".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
             "".to_string(),
