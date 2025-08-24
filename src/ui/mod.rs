@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::app::{App, AppState, InputMode};
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub async fn draw(f: &mut Frame<'_>, app: &App) {
     let size = f.size();
     
     // Create main layout
@@ -35,7 +35,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         .split(chunks[1]);
         
     draw_chat_area(f, app, main_chunks[0]);
-    draw_info_panel(f, app, main_chunks[1]);
+    draw_info_panel(f, app, main_chunks[1]).await;
     
     // Draw input area
     draw_input_area(f, app, chunks[2]);
@@ -87,10 +87,11 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     
+    let mut lines = Vec::new();
+    
     if app.current_channel.is_some() {
         // Show channel messages
         let visible_messages = app.get_visible_messages(inner.height as usize);
-        let mut lines = Vec::new();
         
         for message in visible_messages {
             let timestamp = message.timestamp.format("%H:%M:%S");
@@ -107,30 +108,46 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
             ]);
             lines.push(line);
         }
-        
-        let messages_widget = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset as u16, 0));
-            
-        f.render_widget(messages_widget, inner);
-    } else {
-        // Show status messages
-        let visible_status = app.get_visible_status_messages(inner.height as usize);
-        let mut lines = Vec::new();
-        
-        for status in visible_status {
-            lines.push(Line::from(Span::styled(status, Style::default().fg(Color::Yellow))));
-        }
-        
-        let status_widget = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((app.scroll_offset as u16, 0));
-            
-        f.render_widget(status_widget, inner);
     }
+    
+    // Show status messages (including slash command output) - always visible
+    let visible_status = app.get_visible_status_messages(inner.height as usize);
+    let status_start_idx = app.status_messages.len().saturating_sub(visible_status.len());
+    let recent_status_messages = &app.status_messages[status_start_idx..];
+    
+    // Add separator if we have both channel messages and status messages
+    if !lines.is_empty() && !recent_status_messages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "--- System Messages ---",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+    }
+    
+    for status in recent_status_messages {
+        lines.push(Line::from(Span::styled(status, Style::default().fg(Color::Yellow))));
+    }
+    
+    // Show hint if no messages at all
+    if lines.is_empty() {
+        let hint_text = if app.current_channel.is_some() {
+            "No messages in this channel yet. Type a message and press Enter to send."
+        } else {
+            "Not in a channel. Use /join <geohash> to join a channel, or /help for commands."
+        };
+        lines.push(Line::from(Span::styled(
+            hint_text,
+            Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    
+    let messages_widget = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.scroll_offset as u16, 0));
+        
+    f.render_widget(messages_widget, inner);
 }
 
-fn draw_info_panel(f: &mut Frame, app: &App, area: Rect) {
+async fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -201,17 +218,17 @@ fn draw_info_panel(f: &mut Frame, app: &App, area: Rect) {
     let connection_paragraph = Paragraph::new(connection_text).block(connection_block);
     f.render_widget(connection_paragraph, chunks[1]);
     
-    // Channel list
+    // Channel list - show actual joined channels
     let channels_block = Block::default()
         .borders(Borders::ALL)
         .title(" Channels ")
         .style(Style::default().fg(Color::Blue));
         
-    let channels = vec!["dr5r", "u4pr", "9q5"]; // Mock channels for now
-    let channel_items: Vec<ListItem> = channels
+    let joined_channels = app.channel_manager.list_channels().await;
+    let channel_items: Vec<ListItem> = joined_channels
         .iter()
         .map(|channel| {
-            let style = if app.current_channel.as_deref() == Some(*channel) {
+            let style = if app.current_channel.as_deref() == Some(&**channel) {
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
@@ -220,7 +237,11 @@ fn draw_info_panel(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     
-    let channels_list = List::new(channel_items)
+    let channels_list = if channel_items.is_empty() {
+        List::new(vec![ListItem::new("No channels joined").style(Style::default().fg(Color::Gray))])
+    } else {
+        List::new(channel_items)
+    }
         .block(channels_block)
         .highlight_style(Style::default().bg(Color::DarkGray));
         
@@ -234,8 +255,17 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let mode_indicator = match app.input_mode {
-        InputMode::Normal => "[NORMAL] Press 'i' to enter input mode",
-        InputMode::Editing => "[INPUT] ESC=normal, ENTER=send",
+        InputMode::Normal => "[NORMAL] Press 'i' to enter input mode".to_string(),
+        InputMode::Editing => {
+            if let Some(ref state) = app.tab_completion_state {
+                format!("[INPUT] TAB completion: {} ({}/{})", 
+                    state.matches[state.current_match_index],
+                    state.current_match_index + 1, 
+                    state.matches.len())
+            } else {
+                "[INPUT] ESC=normal, ENTER=send, TAB=complete".to_string()
+            }
+        }
     };
     
     let input_block = Block::default()

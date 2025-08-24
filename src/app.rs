@@ -40,6 +40,18 @@ pub struct App {
     // Message receivers
     message_rx: mpsc::UnboundedReceiver<Message>,
     status_rx: mpsc::UnboundedReceiver<String>,
+    
+    // Tab completion state
+    pub tab_completion_state: Option<TabCompletionState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TabCompletionState {
+    original_input: String,
+    original_cursor: usize,
+    prefix: String,
+    pub matches: Vec<String>,
+    pub current_match_index: usize,
 }
 
 impl App {
@@ -73,6 +85,7 @@ impl App {
             
             message_rx,
             status_rx,
+            tab_completion_state: None,
         };
         
         // Add startup status message
@@ -138,26 +151,35 @@ impl App {
                         self.input_mode = InputMode::Normal;
                     }
                     KeyCode::Char(c) => {
+                        // Reset tab completion on any character input
+                        self.tab_completion_state = None;
                         self.input.insert(self.cursor_position, c);
                         self.cursor_position += 1;
                     }
+                    KeyCode::Tab => {
+                        self.handle_tab_completion().await;
+                    }
                     KeyCode::Backspace => {
+                        self.tab_completion_state = None;
                         if self.cursor_position > 0 {
                             self.input.remove(self.cursor_position - 1);
                             self.cursor_position -= 1;
                         }
                     }
                     KeyCode::Delete => {
+                        self.tab_completion_state = None;
                         if self.cursor_position < self.input.len() {
                             self.input.remove(self.cursor_position);
                         }
                     }
                     KeyCode::Left => {
+                        self.tab_completion_state = None;
                         if self.cursor_position > 0 {
                             self.cursor_position -= 1;
                         }
                     }
                     KeyCode::Right => {
+                        self.tab_completion_state = None;
                         if self.cursor_position < self.input.len() {
                             self.cursor_position += 1;
                         }
@@ -241,6 +263,7 @@ impl App {
                 self.list_all_channels().await;
             }
             "help" | "h" | "commands" => {
+                self.add_status_message("Help command received!".to_string());
                 self.show_help().await;
             }
             "quit" | "q" | "exit" => {
@@ -337,20 +360,20 @@ impl App {
     async fn show_help(&mut self) {
         let help_text = vec![
             "BitchatX Commands:".to_string(),
-            "/join <geohash> - Join a geohash channel".to_string(),
-            "/leave - Leave current channel".to_string(),
-            "/msg <channel> <message> - Send message to specific channel".to_string(),
-            "/nick <nickname> - Change your display name (session only)".to_string(),
-            "/list - List joined channels".to_string(),
+            "/join, /j <geohash> - Join a geohash channel".to_string(),
+            "/leave, /part, /l - Leave current channel".to_string(),
+            "/msg, /m <channel> <message> - Send message to specific channel".to_string(),
+            "/nick, /n <nickname> - Change your display name (session only)".to_string(),
+            "/list, /channels - List joined channels".to_string(),
             "/all - List all channels (joined + listening)".to_string(),
-            "/help, /commands - Show this help".to_string(),
-            "/quit, /exit - Exit BitchatX".to_string(),
+            "/help, /h, /commands - Show this help".to_string(),
+            "/quit, /q, /exit - Exit BitchatX".to_string(),
             "".to_string(),
             "".to_string(),
             "Keyboard Commands:".to_string(),
-            "i=enter input mode, Esc=exit to normal mode, q=quit (normal mode)".to_string(),
-            "Up/Down=scroll messages, Page Up/Down=fast scroll".to_string(),
-            "Home/End=cursor start/end, Enter=send (input mode)".to_string(),
+            "i - Enter input mode, Esc - Exit to normal mode, q - Quit (normal mode)".to_string(),
+            "Tab - Nickname completion (input mode), Up/Down - Scroll messages".to_string(),
+            "Page Up/Down - Fast scroll, Home/End - Cursor start/end".to_string(),
         ];
         
         for line in help_text {
@@ -411,5 +434,102 @@ impl App {
         let start = self.scroll_offset.min(self.status_messages.len().saturating_sub(height));
         let end = (start + height).min(self.status_messages.len());
         self.status_messages[start..end].iter().collect()
+    }
+    
+    async fn handle_tab_completion(&mut self) {
+        // Only work in channels
+        let current_channel = match &self.current_channel {
+            Some(channel) => channel.clone(),
+            None => return,
+        };
+        
+        if let Some(mut state) = self.tab_completion_state.take() {
+            // Continue existing tab completion - cycle to next match
+            if !state.matches.is_empty() {
+                state.current_match_index = (state.current_match_index + 1) % state.matches.len();
+                self.apply_tab_completion(&state);
+                self.tab_completion_state = Some(state);
+            }
+        } else {
+            // Start new tab completion
+            let word_info = self.find_current_word();
+            if let Some((word, _start_pos, _end_pos)) = word_info {
+                if word.len() >= 2 { // Minimum 2 characters to start completion
+                    if let Some(channel) = self.channel_manager.get_channel(&current_channel) {
+                        let matches = channel.find_matching_nicknames(&word);
+                        if !matches.is_empty() {
+                            let state = TabCompletionState {
+                                original_input: self.input.clone(),
+                                original_cursor: self.cursor_position,
+                                prefix: word,
+                                matches,
+                                current_match_index: 0,
+                            };
+                            self.apply_tab_completion(&state);
+                            self.tab_completion_state = Some(state);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    fn find_current_word(&self) -> Option<(String, usize, usize)> {
+        if self.input.is_empty() || self.cursor_position == 0 {
+            return None;
+        }
+        
+        let chars: Vec<char> = self.input.chars().collect();
+        let cursor = self.cursor_position.min(chars.len());
+        
+        // Find word boundaries
+        let mut start = cursor;
+        let mut end = cursor;
+        
+        // Look backward for start of word
+        while start > 0 {
+            let ch = chars[start - 1];
+            if ch.is_whitespace() || ch == ':' || ch == ',' {
+                break;
+            }
+            start -= 1;
+        }
+        
+        // Look forward for end of word (if cursor is in middle of word)
+        while end < chars.len() {
+            let ch = chars[end];
+            if ch.is_whitespace() || ch == ':' || ch == ',' {
+                break;
+            }
+            end += 1;
+        }
+        
+        if start == end {
+            return None;
+        }
+        
+        let word: String = chars[start..end].iter().collect();
+        Some((word, start, end))
+    }
+    
+    fn apply_tab_completion(&mut self, state: &TabCompletionState) {
+        if let Some((_, start_pos, end_pos)) = self.find_current_word() {
+            let replacement = &state.matches[state.current_match_index];
+            
+            // Replace the current word with the completion
+            let mut chars: Vec<char> = self.input.chars().collect();
+            
+            // Remove old word
+            chars.drain(start_pos..end_pos);
+            
+            // Insert completion
+            let replacement_chars: Vec<char> = replacement.chars().collect();
+            for (i, &ch) in replacement_chars.iter().enumerate() {
+                chars.insert(start_pos + i, ch);
+            }
+            
+            self.input = chars.iter().collect();
+            self.cursor_position = start_pos + replacement.len();
+        }
     }
 }

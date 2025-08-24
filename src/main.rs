@@ -137,7 +137,11 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app
     let tick_rate = Duration::from_millis(250);
 
     loop {
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal.draw(|f| {
+            // We need to block on the async draw function
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(ui::draw(f, app))
+        })?;
 
         let timeout_duration = tick_rate
             .checked_sub(last_tick.elapsed())
