@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend}, Terminal,
+    backend::CrosstermBackend, Terminal,
 };
 use std::{
     io,
@@ -132,9 +132,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app
 
     loop {
         terminal.draw(|f| {
-            // We need to block on the async draw function
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(ui::draw(f, app))
+            ui::draw(f, app)
         })?;
 
         let timeout_duration = tick_rate

@@ -1,5 +1,4 @@
 use ratatui::{
-    backend::Backend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -9,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, AppState, InputMode};
 
-pub async fn draw(f: &mut Frame<'_>, app: &App) {
+pub fn draw(f: &mut Frame<'_>, app: &App) {
     let size = f.size();
     
     // Create main layout
@@ -35,7 +34,7 @@ pub async fn draw(f: &mut Frame<'_>, app: &App) {
         .split(chunks[1]);
         
     draw_chat_area(f, app, main_chunks[0]);
-    draw_info_panel(f, app, main_chunks[1]).await;
+    draw_info_panel(f, app, main_chunks[1]);
     
     // Draw input area
     draw_input_area(f, app, chunks[2]);
@@ -78,7 +77,11 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(if let Some(channel) = &app.current_channel {
-            format!(" Channel: #{} ", channel)
+            if channel == "system" {
+                " System Messages ".to_string()
+            } else {
+                format!(" Channel: #{} ", channel)
+            }
         } else {
             " BitchatX - Status ".to_string()
         })
@@ -110,22 +113,8 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     
-    // Show status messages (including slash command output) - always visible
-    let visible_status = app.get_visible_status_messages(inner.height as usize);
-    let status_start_idx = app.status_messages.len().saturating_sub(visible_status.len());
-    let recent_status_messages = &app.status_messages[status_start_idx..];
-    
-    // Add separator if we have both channel messages and status messages
-    if !lines.is_empty() && !recent_status_messages.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "--- System Messages ---",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )));
-    }
-    
-    for status in recent_status_messages {
-        lines.push(Line::from(Span::styled(status, Style::default().fg(Color::Yellow))));
-    }
+    // Status messages are now handled in the system channel
+    // No need to show them separately here
     
     // Show hint if no messages at all
     if lines.is_empty() {
@@ -147,7 +136,7 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(messages_widget, inner);
 }
 
-async fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
+fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -218,29 +207,39 @@ async fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     let connection_paragraph = Paragraph::new(connection_text).block(connection_block);
     f.render_widget(connection_paragraph, chunks[1]);
     
-    // Channel list - show actual joined channels
+    // Channel list - show system channel and joined channels
     let channels_block = Block::default()
         .borders(Borders::ALL)
         .title(" Channels ")
         .style(Style::default().fg(Color::Blue));
         
-    let joined_channels = app.channel_manager.list_channels().await;
-    let channel_items: Vec<ListItem> = joined_channels
-        .iter()
-        .map(|channel| {
-            let style = if app.current_channel.as_deref() == Some(&**channel) {
+    let mut all_channels = Vec::new();
+    
+    // Always show system channel first
+    let system_style = if app.current_channel.as_deref() == Some("system") {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
+    all_channels.push(ListItem::new("system").style(system_style));
+    
+    // Add joined channels
+    let joined_channels = app.channel_manager.list_channels();
+    for channel in joined_channels {
+        if channel != "system" {  // Don't duplicate system channel
+            let style = if app.current_channel.as_deref() == Some(&channel) {
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
             };
-            ListItem::new(format!("#{}", channel)).style(style)
-        })
-        .collect();
+            all_channels.push(ListItem::new(format!("#{}", channel)).style(style));
+        }
+    }
     
-    let channels_list = if channel_items.is_empty() {
-        List::new(vec![ListItem::new("No channels joined").style(Style::default().fg(Color::Gray))])
+    let channels_list = if all_channels.is_empty() {
+        List::new(vec![ListItem::new("No channels").style(Style::default().fg(Color::Gray))])
     } else {
-        List::new(channel_items)
+        List::new(all_channels)
     }
         .block(channels_block)
         .highlight_style(Style::default().bg(Color::DarkGray));

@@ -49,6 +49,21 @@ impl ChannelManager {
         }
     }
     
+    pub fn add_message_sync(&mut self, message: Message) {
+        let channel_name = message.channel.clone();
+        
+        // Create channel if it doesn't exist
+        if !self.channels.contains_key(&channel_name) {
+            let channel = Channel::new(&channel_name);
+            self.channels.insert(channel_name.clone(), channel);
+        }
+        
+        // Add message to channel
+        if let Some(channel) = self.channels.get_mut(&channel_name) {
+            channel.add_message(message);
+        }
+    }
+    
     pub fn get_channel(&self, geohash: &str) -> Option<&Channel> {
         self.channels.get(geohash)
     }
@@ -57,7 +72,7 @@ impl ChannelManager {
         self.channels.get_mut(geohash)
     }
     
-    pub async fn list_channels(&self) -> Vec<String> {
+    pub fn list_channels(&self) -> Vec<String> {
         // Only return actually joined channels
         let mut channels: Vec<String> = self.channels
             .iter()
@@ -72,7 +87,7 @@ impl ChannelManager {
         channels
     }
     
-    pub async fn list_all_channels(&self) -> Vec<(String, bool)> {
+    pub fn list_all_channels(&self) -> Vec<(String, bool)> {
         // Return all channels with joined status
         let mut channels: Vec<(String, bool)> = self.channels
             .iter()
@@ -86,7 +101,7 @@ impl ChannelManager {
         channels
     }
     
-    pub async fn get_message_count(&self, geohash: &str) -> usize {
+    pub fn get_message_count(&self, geohash: &str) -> usize {
         self.channels.get(geohash)
             .map(|c| c.get_message_count())
             .unwrap_or(0)

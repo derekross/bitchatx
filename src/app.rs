@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::channels::{ChannelManager, Message, Channel};
@@ -34,7 +34,7 @@ pub struct App {
     // Channel management
     pub channel_manager: ChannelManager,
     pub current_channel: Option<String>,
-    pub status_messages: Vec<String>,
+    pub system_channel: String,
     
     // Message receivers
     message_rx: mpsc::UnboundedReceiver<Message>,
@@ -79,20 +79,22 @@ impl App {
             identity,
             
             channel_manager,
-            current_channel: None,
-            status_messages: Vec::new(),
+            current_channel: Some("system".to_string()),
+            system_channel: "system".to_string(),
             
             message_rx,
             status_rx,
             tab_completion_state: None,
         };
         
-        // Add startup status message
-        app.add_status_message(format!(
-            "BitchatX v0.1.0 - Connected as {} ({})",
+        // Add welcome message to system channel
+        app.add_status_message("Welcome to BitchatX v0.1.0!".to_string());
+        app.add_status_message(format!("Connected as {} ({})",
             app.identity.nickname,
             if nsec.is_some() { "authenticated" } else { "ephemeral" }
         ));
+        app.add_status_message("Type /help for available commands".to_string());
+        app.add_status_message("To receive messages, join a geohash channel: /join <geohash>".to_string());
         
         // Auto-join channel if specified
         if let Some(channel) = auto_channel {
@@ -115,6 +117,22 @@ impl App {
     }
     
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
+        // Ignore key events with modifiers (except Shift for some keys)
+        // This prevents Ctrl+C, Ctrl+D, etc. from causing unexpected behavior
+        if !key.modifiers.is_empty() {
+            match key.modifiers {
+                KeyModifiers::SHIFT => {
+                    // Allow Shift + Tab (BackTab) and Shift + letter keys
+                    if key.code != KeyCode::BackTab && !matches!(key.code, KeyCode::Char(_)) {
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    // Ignore all other modifier combinations (Ctrl, Alt, etc.)
+                    return Ok(());
+                }
+            }
+        }
         match self.input_mode {
             InputMode::Normal => {
                 match key.code {
@@ -145,6 +163,11 @@ impl App {
                 match key.code {
                     KeyCode::Enter => {
                         self.submit_input().await?;
+                        self.input.clear();
+                        self.cursor_position = 0;
+                        // Stay in input mode after sending message
+                    }
+                    KeyCode::Esc => {
                         self.input.clear();
                         self.cursor_position = 0;
                         self.input_mode = InputMode::Normal;
@@ -183,18 +206,45 @@ impl App {
                             self.cursor_position += 1;
                         }
                     }
+                    KeyCode::Up => {
+                        // Allow scrolling up in edit mode
+                        if self.scroll_offset > 0 {
+                            self.scroll_offset -= 1;
+                        }
+                    }
+                    KeyCode::Down => {
+                        // Allow scrolling down in edit mode
+                        self.scroll_offset += 1;
+                    }
+                    KeyCode::PageUp => {
+                        // Allow page up in edit mode
+                        self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                    }
+                    KeyCode::PageDown => {
+                        // Allow page down in edit mode
+                        self.scroll_offset += 10;
+                    }
                     KeyCode::Home => {
                         self.cursor_position = 0;
                     }
                     KeyCode::End => {
                         self.cursor_position = self.input.len();
                     }
-                    KeyCode::Esc => {
-                        self.input.clear();
-                        self.cursor_position = 0;
-                        self.input_mode = InputMode::Normal;
-                    }
-                    _ => {}
+                    // Explicitly ignore other keys to prevent exiting edit mode
+                    KeyCode::F(_) => {}  // Function keys
+                    KeyCode::BackTab => {}  // Shift+Tab
+                    KeyCode::Insert => {}  // Insert key
+                    KeyCode::Null => {}  // Null key
+                    // Control keys - explicitly handle to prevent unexpected behavior
+                    KeyCode::CapsLock => {}
+                    KeyCode::ScrollLock => {}
+                    KeyCode::NumLock => {}
+                    KeyCode::PrintScreen => {}
+                    KeyCode::Pause => {}
+                    KeyCode::Menu => {}
+                    KeyCode::KeypadBegin => {}
+                    KeyCode::Media(_) => {}
+                    KeyCode::Modifier(_) => {}
                 }
             }
         }
@@ -234,7 +284,11 @@ impl App {
             }
             "leave" | "part" | "l" => {
                 if let Some(channel) = &self.current_channel.clone() {
-                    self.leave_channel(channel).await?;
+                    if channel == "system" {
+                        self.add_status_message("Cannot leave system channel".to_string());
+                    } else {
+                        self.leave_channel(&channel).await?;
+                    }
                 } else {
                     self.add_status_message("No channel to leave".to_string());
                 }
@@ -256,10 +310,10 @@ impl App {
                 self.send_message(channel, &message).await?;
             }
             "list" | "channels" => {
-                self.list_channels().await;
+                self.list_channels();
             }
             "all" => {
-                self.list_all_channels().await;
+                self.list_all_channels();
             }
             "help" | "h" | "commands" => {
                 self.add_status_message("Help command received!".to_string());
@@ -292,11 +346,17 @@ impl App {
     }
     
     async fn leave_channel(&mut self, geohash: &str) -> Result<()> {
+        // Prevent leaving system channel
+        if geohash == "system" {
+            self.add_status_message("Cannot leave system channel".to_string());
+            return Ok(());
+        }
+        
         self.channel_manager.leave_channel(geohash).await?;
         self.nostr_client.unsubscribe_from_channel(geohash).await?;
         
         if self.current_channel.as_deref() == Some(geohash) {
-            self.current_channel = None;
+            self.current_channel = Some(self.system_channel.clone());
         }
         
         self.add_status_message(format!("Left channel #{}", geohash));
@@ -327,28 +387,28 @@ impl App {
         Ok(())
     }
     
-    async fn list_channels(&mut self) {
-        let channels = self.channel_manager.list_channels().await;
+    fn list_channels(&mut self) {
+        let channels = self.channel_manager.list_channels();
         if channels.is_empty() {
             self.add_status_message("No joined channels".to_string());
         } else {
             self.add_status_message("Joined channels:".to_string());
             for channel in channels {
-                let message_count = self.channel_manager.get_message_count(&channel).await;
+                let message_count = self.channel_manager.get_message_count(&channel);
                 let indicator = if Some(&channel) == self.current_channel.as_ref() { "*" } else { " " };
                 self.add_status_message(format!("{}#{} ({} messages)", indicator, channel, message_count));
             }
         }
     }
     
-    async fn list_all_channels(&mut self) {
-        let channels = self.channel_manager.list_all_channels().await;
+    fn list_all_channels(&mut self) {
+        let channels = self.channel_manager.list_all_channels();
         if channels.is_empty() {
             self.add_status_message("No channels available".to_string());
         } else {
             self.add_status_message("All channels (joined + listening):".to_string());
             for (channel, is_joined) in channels {
-                let message_count = self.channel_manager.get_message_count(&channel).await;
+                let message_count = self.channel_manager.get_message_count(&channel);
                 let indicator = if Some(&channel) == self.current_channel.as_ref() { "*" } else { " " };
                 let status = if is_joined { "joined" } else { "listening" };
                 self.add_status_message(format!("{}#{} ({} messages, {})", indicator, channel, message_count, status));
@@ -371,6 +431,7 @@ impl App {
             "".to_string(),
             "Keyboard Commands:".to_string(),
             "i - Enter input mode, Esc - Exit to normal mode, q - Quit (normal mode)".to_string(),
+            "Input mode: Stay in input mode after sending messages, only Esc exits".to_string(),
             "Tab - Nickname completion (input mode), Up/Down - Scroll messages".to_string(),
             "Page Up/Down - Fast scroll, Home/End - Cursor start/end".to_string(),
         ];
@@ -387,13 +448,19 @@ impl App {
     }
     
     pub fn add_status_message(&mut self, message: String) {
-        self.status_messages.push(format!("[{}] {}", 
-            chrono::Local::now().format("%H:%M:%S"), message));
+        // Add system messages to the system channel
+        let system_message = Message {
+            channel: self.system_channel.clone(),
+            nickname: "system".to_string(),
+            content: message,
+            timestamp: chrono::Local::now().into(),
+            is_own: false,
+            pubkey: None,
+        };
         
-        // Keep only last 1000 status messages
-        if self.status_messages.len() > 1000 {
-            self.status_messages.remove(0);
-        }
+        // Add directly to channel manager without going through async receiver
+        // This ensures immediate display
+        let _ = self.channel_manager.add_message_sync(system_message);
     }
     
     pub async fn on_tick(&mut self) -> Result<()> {
@@ -427,12 +494,6 @@ impl App {
         } else {
             vec![]
         }
-    }
-    
-    pub fn get_visible_status_messages(&self, height: usize) -> Vec<&String> {
-        let start = self.scroll_offset.min(self.status_messages.len().saturating_sub(height));
-        let end = (start + height).min(self.status_messages.len());
-        self.status_messages[start..end].iter().collect()
     }
     
     async fn handle_tab_completion(&mut self) {

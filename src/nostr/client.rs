@@ -79,24 +79,15 @@ impl NostrClient {
             while let Ok(notification) = notifications.recv().await {
                 match notification {
                     RelayPoolNotification::Event { event, .. } => {
-                        if let Err(e) = Self::handle_event(*event, &message_tx, &our_pubkey).await {
+                        if let Err(e) = Self::handle_event(*event, &message_tx, &status_tx, &our_pubkey).await {
                             let _ = status_tx.send(format!("Error processing event: {}", e));
                         }
                     }
-                    RelayPoolNotification::Message { message, .. } => {
-                        let _ = status_tx.send(format!("Relay message: {:?}", message));
+                    RelayPoolNotification::Message { .. } => {
+                        // Don't show raw relay messages to users
                     }
-                    RelayPoolNotification::RelayStatus { relay_url, status } => {
-                        let status_msg = match status {
-                            RelayStatus::Connected => format!("Connected to {}", relay_url),
-                            RelayStatus::Connecting => format!("Connecting to {}", relay_url),
-                            RelayStatus::Disconnected => format!("Disconnected from {}", relay_url),
-                            RelayStatus::Initialized => format!("Initialized {}", relay_url),
-                            RelayStatus::Pending => format!("Pending connection to {}", relay_url),
-                            RelayStatus::Stopped => format!("Stopped {}", relay_url),
-                            RelayStatus::Terminated => format!("Terminated {}", relay_url),
-                        };
-                        let _ = status_tx.send(status_msg);
+                    RelayPoolNotification::RelayStatus { .. } => {
+                        // Don't show relay connection status messages to users
                     }
                     _ => {}
                 }
@@ -109,6 +100,7 @@ impl NostrClient {
     async fn handle_event(
         event: Event,
         message_tx: &mpsc::UnboundedSender<Message>,
+        _status_tx: &mpsc::UnboundedSender<String>,
         our_pubkey: &str,
     ) -> Result<()> {
         // Only process kind 20000 (ephemeral events)
@@ -208,8 +200,8 @@ impl NostrClient {
         
         // Send to all connected relays with timeout
         match timeout(Duration::from_secs(5), self.client.send_event(event)).await {
-            Ok(event_id) => {
-                let _ = self.status_tx.send(format!("Message sent to #{}", channel));
+            Ok(_event_id) => {
+                // Don't spam with "Message sent" notifications
             }
             Err(_) => {
                 let _ = self.status_tx.send(format!("Message send timeout to #{}", channel));
