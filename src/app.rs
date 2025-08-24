@@ -576,20 +576,21 @@ impl App {
         if let Some((_, start_pos, end_pos)) = self.find_current_word() {
             let replacement = &state.matches[state.current_match_index];
             
-            // Replace the current word with the completion
+            // Replace the current word with the completion + ": "
             let mut chars: Vec<char> = self.input.chars().collect();
             
             // Remove old word
             chars.drain(start_pos..end_pos);
             
-            // Insert completion
-            let replacement_chars: Vec<char> = replacement.chars().collect();
+            // Insert completion + ": "
+            let replacement_with_suffix = format!("{}: ", replacement);
+            let replacement_chars: Vec<char> = replacement_with_suffix.chars().collect();
             for (i, &ch) in replacement_chars.iter().enumerate() {
                 chars.insert(start_pos + i, ch);
             }
             
             self.input = chars.iter().collect();
-            self.cursor_position = start_pos + replacement.len();
+            self.cursor_position = start_pos + replacement_with_suffix.len();
         }
     }
 }
