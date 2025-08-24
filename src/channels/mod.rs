@@ -64,12 +64,17 @@ impl Channel {
             );
         }
         
-        self.messages.push(message);
+        // Insert message in timestamp order (newer messages at the end)
+        let insert_pos = self.messages.binary_search_by(|existing| {
+            existing.timestamp.cmp(&message.timestamp)
+        }).unwrap_or_else(|e| e);
+        
+        self.messages.insert(insert_pos, message);
         self.last_activity = now;
         
-        // Keep only last 1000 messages per channel
+        // Keep only last 1000 messages per channel (remove oldest)
         if self.messages.len() > 1000 {
-            self.messages.remove(0);
+            self.messages.remove(0);  // Remove oldest message (at index 0)
         }
         
         // Clean up inactive participants (not seen for 1 hour)
