@@ -1,0 +1,48 @@
+[package]
+name = "bitchatx"
+version = "0.1.0"
+edition = "2021"
+authors = ["BitchatX Team"]
+description = "IRC-style Nostr client for ephemeral geohash channels inspired by BitchX"
+license = "MIT"
+repository = "https://github.com/bitchatx/bitchatx"
+
+[dependencies]
+# TUI and Terminal
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Nostr Protocol
+nostr-sdk = "0.29"
+nostr = "0.29"
+
+# Async Runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Utilities
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+geohash = "0.13"
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+dirs = "5.0"
+toml = "0.8"
+
+# Crypto and Random
+rand = "0.8"
+
+# DateTime handling
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+
+[target.x86_64-apple-darwin]
+linker = "cc"
