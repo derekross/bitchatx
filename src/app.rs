@@ -977,10 +977,11 @@ impl App {
     }
     
     fn is_action_command_context(&self, _word_start_pos: usize) -> bool {
-        // Simple check: if input starts with /hug, /slap, /block, or /unblock, we're in action command context
+        // Simple check: if input starts with action commands, we're in action command context
         let input = self.input.trim_start();
         input.starts_with("/hug ") || input.starts_with("/slap ") || 
-        input.starts_with("/block ") || input.starts_with("/unblock ")
+        input.starts_with("/block ") || input.starts_with("/unblock ") ||
+        input.starts_with("/whois ") || input.starts_with("/w ")
     }
     
     fn scroll_to_bottom(&mut self) {
