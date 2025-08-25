@@ -74,9 +74,11 @@ impl Channel {
         self.messages.insert(insert_pos, message);
         self.last_activity = now;
         
-        // Keep only last 1000 messages per channel (remove oldest from beginning)
-        if self.messages.len() > 1000 {
-            self.messages.remove(0);  // Remove oldest message from beginning (oldest are at beginning)
+        // Keep only last 500 messages per channel (reduced from 1000 for better performance)
+        if self.messages.len() > 500 {
+            // Remove oldest messages in batches for better performance
+            let remove_count = self.messages.len() - 500;
+            self.messages.drain(0..remove_count);
         }
         
         // Clean up inactive participants (not seen for 1 hour)

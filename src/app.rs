@@ -409,7 +409,7 @@ impl App {
                     return Ok(());
                 }
                 let nickname = parts[1];
-                let slap_message = format!("* {} slaps {} around a bit with a large trout", self.identity.nickname, nickname);
+                let slap_message = format!("* {} slaps {} around a bit with a large trout 🐟", self.identity.nickname, nickname);
                 self.send_action_message(&slap_message).await?;
             }
             "block" => {
@@ -696,7 +696,8 @@ impl App {
                 continue; // Skip blocked messages entirely
             }
             
-            self.channel_manager.add_message(message).await;
+            // Use sync version for faster processing (no await overhead)
+            let _ = self.channel_manager.add_message_sync(message);
             new_messages_count += 1;
         }
         
@@ -764,10 +765,21 @@ impl App {
         }
     }
     
-    pub fn get_visible_messages(&self, _height: usize) -> Vec<&Message> {
+    pub fn get_visible_messages(&self, height: usize) -> Vec<&Message> {
         if let Some(channel) = self.get_current_channel() {
-            // Return all messages - let the UI widget handle scrolling
-            channel.messages.iter().collect()
+            // Return only recent messages for better UI performance
+            // Limit to 2x viewport height to prevent UI slowdown
+            let max_visible = height.max(100) * 2; // At least 200 messages, but no more than 2x screen
+            let message_count = channel.messages.len();
+            
+            if message_count <= max_visible {
+                // If we have few messages, return all
+                channel.messages.iter().collect()
+            } else {
+                // If we have many messages, return only the most recent ones
+                let start_index = message_count - max_visible;
+                channel.messages[start_index..].iter().collect()
+            }
         } else {
             vec![]
         }
