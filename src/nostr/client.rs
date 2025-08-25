@@ -151,6 +151,8 @@ impl NostrClient {
                     .unwrap_or_else(chrono::Utc::now),
                 pubkey: Some(event.pubkey.to_hex()),
                 is_own,
+                is_private: false,
+                recipient_pubkey: None,
             };
             
             let _ = message_tx.send(message);

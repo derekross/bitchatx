@@ -3,6 +3,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct Participant {
     pub nickname: String,
+    pub pubkey: Option<String>,
     pub last_seen: chrono::DateTime<chrono::Utc>,
     pub message_count: usize,
 }
@@ -55,11 +56,16 @@ impl Channel {
         if let Some(participant) = self.participants.get_mut(&message.nickname) {
             participant.last_seen = now;
             participant.message_count += 1;
+            // Update pubkey if it's provided and we don't have it
+            if participant.pubkey.is_none() && message.pubkey.is_some() {
+                participant.pubkey = message.pubkey.clone();
+            }
         } else {
             self.participants.insert(
                 message.nickname.clone(),
                 Participant {
                     nickname: message.nickname.clone(),
+                    pubkey: message.pubkey.clone(),
                     last_seen: now,
                     message_count: 1,
                 }
@@ -115,20 +121,39 @@ impl Channel {
         let prefix_lower = prefix.to_lowercase();
         let mut matches: Vec<String> = self.participants
             .values()
-            .filter(|p| p.nickname.to_lowercase().starts_with(&prefix_lower))
-            .map(|p| p.nickname.clone())
+            .filter_map(|p| {
+                // Format the display nickname with pubkey suffix
+                let display_nickname = match &p.pubkey {
+                    Some(pk) if pk.len() >= 4 => {
+                        format!("{}#{}", p.nickname, &pk[..4])
+                    }
+                    _ => p.nickname.clone(),
+                };
+                
+                // Check if either plain nickname or display nickname matches
+                if p.nickname.to_lowercase().starts_with(&prefix_lower) ||
+                   display_nickname.to_lowercase().starts_with(&prefix_lower) {
+                    Some(display_nickname)
+                } else {
+                    None
+                }
+            })
             .collect();
         
-        // Sort by recent activity (most recent first)
+        // Remove duplicates and sort by recent activity (most recent first)
         matches.sort_by(|a, b| {
-            let a_participant = self.participants.get(a);
-            let b_participant = self.participants.get(b);
+            // Extract plain nickname from display nickname for lookup
+            let a_nick = a.split('#').next().unwrap_or(a);
+            let b_nick = b.split('#').next().unwrap_or(b);
+            let a_participant = self.participants.get(a_nick);
+            let b_participant = self.participants.get(b_nick);
             match (a_participant, b_participant) {
                 (Some(a), Some(b)) => b.last_seen.cmp(&a.last_seen),
                 _ => std::cmp::Ordering::Equal,
             }
         });
         
+        matches.dedup();
         matches
     }
 }

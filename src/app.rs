@@ -2,7 +2,7 @@ use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use rand::Rng;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use arboard::Clipboard;
 
 use crate::channels::{ChannelManager, Message, Channel};
@@ -52,6 +52,9 @@ pub struct App {
     
     // Blocking functionality - using pubkey hex strings like Android geohash blocking
     blocked_users: HashSet<String>,
+    
+    // Private messaging support
+    pub private_chats: HashMap<String, String>, // pubkey -> nickname mapping
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +107,7 @@ impl App {
             status_rx,
             tab_completion_state: None,
             blocked_users: HashSet::new(),
+            private_chats: HashMap::new(),
         };
         
         // Add welcome message to system channel
@@ -389,12 +393,12 @@ impl App {
             }
             "msg" | "m" => {
                 if parts.len() < 3 {
-                    self.add_status_message("Usage: /msg <channel> <message>".to_string());
+                    self.add_status_message("Usage: /msg <channel/nickname> <message>".to_string());
                     return Ok(());
                 }
-                let channel = parts[1];
-                let message = parts[2..].join(" ");
-                self.send_message(channel, &message).await?;
+                let target = parts[1];
+                let message_content = parts[2..].join(" ");
+                self.send_msg_to_target(target, &message_content).await?;
             }
             "list" | "channels" => {
                 self.list_channels();
@@ -508,6 +512,8 @@ impl App {
             timestamp: chrono::Utc::now(),
             pubkey: Some(self.identity.pubkey.clone()),
             is_own: true,
+            is_private: false,
+            recipient_pubkey: None,
         };
         
         // Use sync version for immediate display
@@ -526,6 +532,66 @@ impl App {
         // Enable auto-scrolling before network operations
         self.should_autoscroll = true;
         self.scroll_to_bottom();
+        
+        Ok(())
+    }
+    
+    async fn send_msg_to_target(&mut self, target: &str, content: &str) -> Result<()> {
+        // First check if target is a joined channel
+        let joined_channels = self.channel_manager.list_channels();
+        if joined_channels.contains(&target.to_string()) {
+            // Send to channel
+            self.send_message(target, content).await?;
+            return Ok(());
+        }
+        
+        // Check if target looks like a geohash pattern (valid channel but not joined)
+        if self.is_valid_geohash(target) {
+            // Send to channel even if not joined
+            self.send_message(target, content).await?;
+            return Ok(());
+        }
+        
+        // Otherwise, treat as private message to user
+        self.send_private_message(target, content).await?;
+        Ok(())
+    }
+    
+    async fn send_private_message(&mut self, nickname: &str, content: &str) -> Result<()> {
+        // Find the pubkey for this nickname
+        let recipient_pubkey = self.find_pubkey_for_nickname(nickname).await;
+        
+        if let Some(pubkey) = recipient_pubkey {
+            // Create a private message channel name based on the pubkey
+            let dm_channel = format!("dm:{}", &pubkey);
+            
+            // Add to private chats if not already there
+            self.private_chats.insert(pubkey.clone(), nickname.to_string());
+            
+            // Create the private message
+            let message = Message {
+                channel: dm_channel.clone(),
+                nickname: self.identity.nickname.clone(),
+                content: content.to_string(),
+                timestamp: chrono::Utc::now(),
+                pubkey: Some(self.identity.pubkey.clone()),
+                is_own: true,
+                is_private: true,
+                recipient_pubkey: Some(pubkey.clone()),
+            };
+            
+            // Add to channel manager for display
+            let _ = self.channel_manager.add_message_sync(message);
+            
+            // TODO: Send via Nostr using NIP-17 (for now just show locally)
+            self.add_status_message(format!("Private message sent to {} (local only for now)", nickname));
+            
+            // Enable auto-scrolling
+            self.should_autoscroll = true;
+            self.scroll_to_bottom();
+        } else {
+            self.add_status_message(format!("User '{}' not found. They must have sent a message in a channel first.", nickname));
+        }
         
         Ok(())
     }
@@ -554,6 +620,9 @@ impl App {
     async fn show_all_recent_messages(&mut self) {
         let ten_minutes_ago = chrono::Utc::now() - chrono::Duration::minutes(10);
         
+        // Enable autoscroll to ensure all messages are visible
+        self.should_autoscroll = true;
+        
         // Get all channels (both joined and listening-only) from channel manager
         let all_channels = self.channel_manager.list_all_channels();
         
@@ -567,7 +636,8 @@ impl App {
                     .filter(|msg| msg.timestamp >= ten_minutes_ago)
                     .map(|msg| {
                         let timestamp = msg.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S");
-                        format!("[{}] <{}> {}", timestamp, msg.nickname, msg.content)
+                        let display_nickname = self.format_display_nickname(&msg.nickname, &msg.pubkey);
+                        format!("[{}] <{}> {}", timestamp, display_nickname, msg.content)
                     })
                     .collect();
                 
@@ -606,6 +676,9 @@ impl App {
             
             self.add_message_to_current_channel("=== End of Recent Activity ===".to_string());
         }
+        
+        // Ensure we scroll to bottom after adding all messages
+        self.scroll_to_bottom();
     }
     
     async fn show_help(&mut self) {
@@ -662,6 +735,8 @@ impl App {
             timestamp: chrono::Local::now().into(),
             is_own: false,
             pubkey: None,
+            is_private: false,
+            recipient_pubkey: None,
         };
         
         // Add directly to channel manager without going through async receiver
@@ -684,6 +759,8 @@ impl App {
             timestamp: chrono::Local::now().into(),
             is_own: false,
             pubkey: None,
+            is_private: false,
+            recipient_pubkey: None,
         };
         
         // Add directly to channel manager without going through async receiver
@@ -711,7 +788,8 @@ impl App {
         
         // Auto-scroll to bottom if we received new messages and should auto-scroll
         if new_messages_count > 0 && self.should_autoscroll {
-            self.scroll_to_bottom();
+            // We don't know the viewport height here, so we'll let the UI handle the scroll position
+            // by keeping should_autoscroll = true, and the UI will position it correctly
         }
         
         // Process status updates
@@ -773,7 +851,7 @@ impl App {
         }
     }
     
-    pub fn get_visible_messages(&self, height: usize) -> (Vec<(String, String, String, bool)>, usize) {
+    pub fn get_visible_messages(&self, height: usize) -> (Vec<(String, String, String, bool, Option<String>)>, usize) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
             
@@ -785,42 +863,51 @@ impl App {
             let viewport_height = height;
             let total_messages = channel.messages.len();
             
-            // Calculate proper scroll offset, handling autoscroll and bounds checking
-            let corrected_scroll_offset = if self.should_autoscroll {
-                // Auto-scroll: show the most recent messages
+            // Calculate effective scroll offset based on autoscroll setting and bounds checking  
+            let effective_scroll_offset = if self.should_autoscroll {
+                // Auto-scroll: show the most recent messages at the bottom
+                // Ensure we don't scroll past the last message
                 if total_messages > viewport_height {
-                    total_messages - viewport_height
+                    total_messages.saturating_sub(viewport_height)
                 } else {
                     0
                 }
             } else {
-                // Manual scroll: respect user's scroll position but keep it valid
+                // Manual scroll: use current scroll_offset but ensure it's valid
                 if self.scroll_offset >= total_messages {
+                    // If scroll_offset is beyond available messages, fix it
                     if total_messages > viewport_height {
-                        total_messages - viewport_height
+                        total_messages.saturating_sub(viewport_height)
                     } else {
                         0
                     }
                 } else {
-                    self.scroll_offset
+                    // Ensure scroll_offset doesn't go beyond bounds
+                    let max_offset = if total_messages > viewport_height {
+                        total_messages - viewport_height
+                    } else {
+                        0
+                    };
+                    self.scroll_offset.min(max_offset)
                 }
             };
             
             // Calculate range of messages to display
-            let start_index = corrected_scroll_offset;
+            let start_index = effective_scroll_offset;
             let end_index = (start_index + viewport_height).min(total_messages);
             
-            // Convert messages to owned data and return with the corrected offset
+            // Convert messages to owned data and return with the effective offset
             let message_data: Vec<_> = channel.messages[start_index..end_index]
                 .iter()
                 .map(|msg| (
                     msg.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string(),
                     msg.nickname.clone(),
                     msg.content.clone(),
-                    msg.is_own
+                    msg.is_own,
+                    msg.pubkey.clone()
                 ))
                 .collect();
-            (message_data, corrected_scroll_offset)
+            (message_data, effective_scroll_offset)
         } else {
             (vec![], 0)
         }
@@ -843,21 +930,29 @@ impl App {
         } else {
             // Start new tab completion
             let word_info = self.find_current_word();
-            if let Some((word, _start_pos, _end_pos)) = word_info {
+            if let Some((word, start_pos, _end_pos)) = word_info {
                 if word.len() >= 2 { // Minimum 2 characters to start completion
-                    if let Some(channel) = self.channel_manager.get_channel(&current_channel) {
-                        let matches = channel.find_matching_nicknames(&word);
-                        if !matches.is_empty() {
-                            let state = TabCompletionState {
-                                original_input: self.input.clone(),
-                                original_cursor: self.cursor_position,
-                                prefix: word,
-                                matches,
-                                current_match_index: 0,
-                            };
-                            self.apply_tab_completion(&state);
-                            self.tab_completion_state = Some(state);
-                        }
+                    let matches = if self.is_action_command_context(start_pos) && 
+                                     (self.input.trim_start().starts_with("/msg ") || self.input.trim_start().starts_with("/m ")) {
+                        // For /msg command, complete both channels and nicknames
+                        self.get_msg_completion_matches(&word)
+                    } else if let Some(channel) = self.channel_manager.get_channel(&current_channel) {
+                        // Regular nickname completion for current channel
+                        channel.find_matching_nicknames(&word)
+                    } else {
+                        vec![]
+                    };
+                    
+                    if !matches.is_empty() {
+                        let state = TabCompletionState {
+                            original_input: self.input.clone(),
+                            original_cursor: self.cursor_position,
+                            prefix: word,
+                            matches,
+                            current_match_index: 0,
+                        };
+                        self.apply_tab_completion(&state);
+                        self.tab_completion_state = Some(state);
                     }
                 }
             }
@@ -909,6 +1004,7 @@ impl App {
             // Check if we're in a slash command context or action command context
             let is_slash_command_context = self.is_slash_command_context(start_pos);
             let is_action_command = self.is_action_command_context(start_pos);
+            let is_msg_command = self.is_msg_command_context();
             
             // Replace the current word with the completion
             let mut chars: Vec<char> = self.input.chars().collect();
@@ -916,10 +1012,16 @@ impl App {
             // Remove old word
             chars.drain(start_pos..end_pos);
             
-            // Only add ": " if this is NOT a slash command context or action command
-            let replacement_with_suffix = if is_slash_command_context || is_action_command {
+            // Determine the appropriate suffix based on context
+            let replacement_with_suffix = if is_slash_command_context {
+                replacement.to_string()
+            } else if is_msg_command {
+                // For /msg and /m commands, use space instead of ": "
+                format!("{} ", replacement)
+            } else if is_action_command {
                 replacement.to_string()
             } else {
+                // Regular nickname completion gets ": "
                 format!("{}: ", replacement)
             };
             
@@ -933,6 +1035,49 @@ impl App {
         }
     }
     
+    /// Get completion matches for /msg command (both channels and nicknames)
+    fn get_msg_completion_matches(&self, prefix: &str) -> Vec<String> {
+        let mut matches = Vec::new();
+        
+        // Add joined channels
+        let joined_channels = self.channel_manager.list_channels();
+        for channel in &joined_channels {
+            if channel != "system" && channel.to_lowercase().starts_with(&prefix.to_lowercase()) {
+                matches.push(channel.clone());
+            }
+        }
+        
+        // Add nicknames from all channels
+        let all_channels = self.channel_manager.list_all_channels();
+        for (channel_name, _) in &all_channels {
+            if let Some(channel) = self.channel_manager.get_channel(channel_name) {
+                let channel_matches = channel.find_matching_nicknames(prefix);
+                for nickname in channel_matches {
+                    // Remove the pubkey suffix for /msg completion (user just types plain nickname)
+                    let plain_nickname = if let Some(hash_pos) = nickname.find('#') {
+                        &nickname[..hash_pos]
+                    } else {
+                        &nickname
+                    };
+                    
+                    if !matches.contains(&plain_nickname.to_string()) {
+                        matches.push(plain_nickname.to_string());
+                    }
+                }
+            }
+        }
+        
+        // Add private chat nicknames
+        for nickname in self.private_chats.values() {
+            if nickname.to_lowercase().starts_with(&prefix.to_lowercase()) && !matches.contains(nickname) {
+                matches.push(nickname.clone());
+            }
+        }
+        
+        matches.sort();
+        matches
+    }
+    
     async fn send_action_message(&mut self, action: &str) -> Result<()> {
         if let Some(channel) = &self.current_channel {
             // Create an action message (similar to regular message but marked as action)
@@ -943,6 +1088,8 @@ impl App {
                 timestamp: chrono::Utc::now(),
                 pubkey: Some(self.identity.pubkey.clone()),
                 is_own: true,
+                is_private: false,
+                recipient_pubkey: None,
             };
             
             if channel == "system" {
@@ -1035,6 +1182,12 @@ impl App {
         input.starts_with("/hug ") || input.starts_with("/slap ") || 
         input.starts_with("/block ") || input.starts_with("/unblock ") ||
         input.starts_with("/whois ") || input.starts_with("/w ")
+    }
+    
+    fn is_msg_command_context(&self) -> bool {
+        // Check if we're completing arguments for /msg or /m commands
+        let input = self.input.trim_start();
+        input.starts_with("/msg ") || input.starts_with("/m ")
     }
     
     fn scroll_to_bottom(&mut self) {
@@ -1293,18 +1446,41 @@ impl App {
         }
     }
     
-    /// Update input horizontal scroll to keep cursor visible
-    fn update_input_scroll(&mut self) {
-        // Estimate visible width for input area (typically terminal width - borders)
-        let visible_width = 80; // Conservative estimate
+    /// Format a nickname with pubkey suffix if available (e.g., "alice#02c1")
+    pub fn format_display_nickname(&self, nickname: &str, pubkey: &Option<String>) -> String {
+        match pubkey {
+            Some(pk) if pk.len() >= 4 => {
+                // Take first 4 characters of pubkey as suffix
+                let suffix = &pk[..4];
+                format!("{}#{}", nickname, suffix)
+            }
+            _ => nickname.to_string(),
+        }
+    }
+    
+    
+    /// Update input horizontal scroll to keep cursor visible with a specific width
+    pub fn update_input_scroll_with_width(&mut self, available_width: usize) {
+        if available_width <= 1 {
+            self.input_horizontal_scroll = 0;
+            return;
+        }
         
-        // If cursor is beyond visible area, scroll horizontally
-        if self.cursor_position > self.input_horizontal_scroll + visible_width {
-            self.input_horizontal_scroll = self.cursor_position - visible_width + 10; // Keep some context
+        // Keep cursor within the visible area with some buffer
+        let visible_width = available_width.saturating_sub(1); // Account for cursor
+        
+        // If cursor is beyond the right edge of visible area, scroll right
+        if self.cursor_position >= self.input_horizontal_scroll + visible_width {
+            self.input_horizontal_scroll = self.cursor_position.saturating_sub(visible_width) + 1;
         }
-        // If cursor is far behind scroll position, scroll back
+        // If cursor is before the left edge of visible area, scroll left
         else if self.cursor_position < self.input_horizontal_scroll {
-            self.input_horizontal_scroll = self.cursor_position.saturating_sub(10); // Keep some context
+            self.input_horizontal_scroll = self.cursor_position;
         }
+    }
+    
+    /// Update input horizontal scroll to keep cursor visible (fallback with estimate)
+    fn update_input_scroll(&mut self) {
+        self.update_input_scroll_with_width(80); // Conservative fallback estimate
     }
 }

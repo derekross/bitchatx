@@ -98,21 +98,23 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
     
     if app.current_channel.is_some() {
         // Show channel messages with automatic scroll handling
-        let (visible_messages, corrected_scroll_offset) = app.get_visible_messages(viewport_height);
+        let (visible_messages, effective_scroll_offset) = app.get_visible_messages(viewport_height);
         
-        // Update the app's scroll offset if it was corrected
-        app.update_scroll_offset(corrected_scroll_offset);
+        // Always update the app's scroll offset to match what's being displayed
+        app.update_scroll_offset(effective_scroll_offset);
         
-        for (timestamp, nickname, content, is_own) in visible_messages {
+        for (timestamp, nickname, content, is_own, pubkey) in visible_messages {
             let nick_color = if is_own { 
                 Color::Green 
             } else { 
                 Color::Magenta 
             };
             
+            let display_nickname = app.format_display_nickname(&nickname, &pubkey);
+            
             let line = Line::from(vec![
                 Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::Gray)),
-                Span::styled(format!("<{}> ", nickname), Style::default().fg(nick_color)),
+                Span::styled(format!("<{}> ", display_nickname), Style::default().fg(nick_color)),
                 Span::raw(content),
             ]);
             lines.push(line);
@@ -233,21 +235,37 @@ fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     let all_channel_info = app.channel_manager.list_all_channels();
     for (channel, is_joined) in all_channel_info {
         if channel != "system" {  // Don't duplicate system channel
-            let style = if app.current_channel.as_deref() == Some(&channel) {
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else if is_joined {
-                Style::default().fg(Color::White)
+            if channel.starts_with("dm:") {
+                // This is a private message channel
+                let pubkey = &channel[3..]; // Remove "dm:" prefix
+                if let Some(nickname) = app.private_chats.get(pubkey) {
+                    let style = if app.current_channel.as_deref() == Some(&channel) {
+                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Magenta)
+                    };
+                    
+                    let dm_label = format!("@{}", nickname);
+                    all_channels.push(ListItem::new(dm_label).style(style));
+                }
             } else {
-                Style::default().fg(Color::Gray)  // Different color for listening-only channels
-            };
-            
-            let active_users = app.channel_manager.get_active_user_count(&channel);
-            let channel_label = if is_joined {
-                format!("#{} ({})", channel, active_users)
-            } else {
-                format!("#{} ({})", channel, active_users)  // Show active user count for all channels
-            };
-            all_channels.push(ListItem::new(channel_label).style(style));
+                // Regular geohash channel
+                let style = if app.current_channel.as_deref() == Some(&channel) {
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                } else if is_joined {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::Gray)  // Different color for listening-only channels
+                };
+                
+                let active_users = app.channel_manager.get_active_user_count(&channel);
+                let channel_label = if is_joined {
+                    format!("#{} ({})", channel, active_users)
+                } else {
+                    format!("#{} ({})", channel, active_users)  // Show active user count for all channels
+                };
+                all_channels.push(ListItem::new(channel_label).style(style));
+            }
         }
     }
     
@@ -262,7 +280,7 @@ fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_widget(channels_list, chunks[2]);
 }
 
-fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
+fn draw_input_area(f: &mut Frame, app: &mut App, area: Rect) {
     let input_style = match app.input_mode {
         InputMode::Normal => Style::default().fg(Color::White),
         InputMode::Editing => Style::default().fg(Color::Green),
@@ -287,28 +305,52 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
         .title(mode_indicator)
         .style(input_style);
     
+    // Calculate inner area before consuming input_block
+    let inner_area = input_block.inner(area);
+    
+    // Update scroll offset based on actual available width
+    if app.input_mode == InputMode::Editing {
+        app.update_input_scroll_with_width(inner_area.width as usize);
+    }
+    
     let input_text = if app.input_mode == InputMode::Editing {
-        app.input.as_str()
+        let text = app.input.as_str();
+        let scroll_start = app.input_horizontal_scroll;
+        
+        // Truncate text to show only the visible portion
+        if scroll_start < text.len() {
+            let visible_width = inner_area.width as usize;
+            let remaining_text = &text[scroll_start..];
+            if remaining_text.len() > visible_width {
+                &remaining_text[..visible_width]
+            } else {
+                remaining_text
+            }
+        } else {
+            ""
+        }
     } else {
         ""
     };
     
     let input_paragraph = Paragraph::new(input_text)
-        .block(input_block)
-        .wrap(Wrap { trim: false })
-        .scroll((0, app.input_horizontal_scroll as u16));
+        .block(input_block);
         
     f.render_widget(input_paragraph, area);
     
-    // Set cursor position when in editing mode
+    // Set cursor position when in editing mode with horizontal scrolling
     if app.input_mode == InputMode::Editing {
-        // Calculate cursor position with horizontal scrolling
-        let cursor_x = (app.cursor_position as i16 - app.input_horizontal_scroll as i16 + 1).max(0) as u16;
-        let cursor_y = 1; // Keep cursor on first line for now
+        // Calculate visible cursor position accounting for horizontal scroll
+        let cursor_x = (app.cursor_position as i16 - app.input_horizontal_scroll as i16).max(0) as u16;
+        let cursor_y = 0; // First line of inner area (0-indexed)
+        
+        // Ensure cursor stays within inner area bounds
+        let max_x = inner_area.width.saturating_sub(1);
+        let cursor_x = cursor_x.min(max_x);
         
         f.set_cursor(
-            area.x + cursor_x,
-            area.y + cursor_y,
+            inner_area.x + cursor_x,
+            inner_area.y + cursor_y,
         );
     }
 }
