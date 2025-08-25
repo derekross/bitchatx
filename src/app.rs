@@ -786,10 +786,10 @@ impl App {
             new_messages_count += 1;
         }
         
-        // Auto-scroll to bottom if we received new messages and should auto-scroll
-        if new_messages_count > 0 && self.should_autoscroll {
-            // We don't know the viewport height here, so we'll let the UI handle the scroll position
-            // by keeping should_autoscroll = true, and the UI will position it correctly
+        // Auto-scroll to bottom if we received new messages
+        if new_messages_count > 0 {
+            // Check if we should re-enable autoscroll for new messages
+            self.update_autoscroll_status_with_height(25); // Use reasonable default height
         }
         
         // Process status updates
@@ -1222,8 +1222,15 @@ impl App {
             let message_count = channel.messages.len();
             
             // If we're at or near bottom, re-enable auto-scrolling
-            let bottom_threshold = message_count.saturating_sub(viewport_height);
-            if self.scroll_offset >= bottom_threshold.saturating_sub(5) {
+            let bottom_threshold = if message_count > viewport_height {
+                message_count.saturating_sub(viewport_height)
+            } else {
+                0
+            };
+            
+            // More lenient threshold - if we're within 2 messages of the bottom, enable autoscroll
+            let threshold_margin = 2.min(viewport_height / 4); // At most 25% of viewport or 2 messages
+            if self.scroll_offset >= bottom_threshold.saturating_sub(threshold_margin) {
                 self.should_autoscroll = true;
             }
         }

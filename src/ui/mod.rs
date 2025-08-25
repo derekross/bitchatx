@@ -103,6 +103,9 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
         // Always update the app's scroll offset to match what's being displayed
         app.update_scroll_offset(effective_scroll_offset);
         
+        // Update autoscroll status with actual viewport height for better accuracy
+        app.update_autoscroll_status_with_height(viewport_height);
+        
         for (timestamp, nickname, content, is_own, pubkey) in visible_messages {
             let nick_color = if is_own { 
                 Color::Green 
@@ -138,8 +141,7 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
     }
     
     let messages_widget = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((app.scroll_offset as u16, 0));
+        .wrap(Wrap { trim: false });
         
     f.render_widget(messages_widget, inner);
 }

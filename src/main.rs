@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
             Arg::new("nsec")
                 .long("nsec")
                 .value_name("NSEC_KEY")
-                .help("Login with your Nostr private key (nsec format)")
+                .help("Login with your Nostr private key (nsec format) - WARNING: Visible in process list!")
         )
         .arg(
             Arg::new("channel")
@@ -100,6 +100,10 @@ async fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
+    
+    // Set a safe terminal title to prevent nsec exposure
+    print!("\x1b]0;BitchatX - Nostr Client\x07");
+    
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -119,6 +123,9 @@ async fn main() -> Result<()> {
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+    
+    // Reset terminal title to default
+    print!("\x1b]0;\x07");
 
     if let Err(_err) = res {
         // Error handling could be improved here

@@ -28,7 +28,7 @@ impl Identity {
     /// Create identity from nsec private key and fetch profile
     pub async fn from_nsec(nsec: &str) -> Result<Self> {
         let secret_key = SecretKey::from_bech32(nsec)
-            .map_err(|e| anyhow!("Invalid nsec format: {}", e))?;
+            .map_err(|_| anyhow!("Invalid nsec format"))?;
         let keys = Keys::new(secret_key);
         let pubkey_hex = keys.public_key().to_hex();
         let pubkey = keys.public_key();
