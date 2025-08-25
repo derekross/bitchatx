@@ -1,7 +1,7 @@
 [package]
 name = "bitchatx"
-version = "0.2.0"
-edition = "2021"
+version = "0.2.1"
+edition = "2025"
 authors = ["BitchatX Team"]
 description = "IRC-style Nostr client for ephemeral geohash channels inspired by BitchX"
 license = "MIT"
