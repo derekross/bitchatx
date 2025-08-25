@@ -115,11 +115,15 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
             
             let display_nickname = app.format_display_nickname(&nickname, &pubkey);
             
-            let line = Line::from(vec![
+            let mut message_spans = vec![
                 Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::Gray)),
                 Span::styled(format!("<{}> ", display_nickname), Style::default().fg(nick_color)),
-                Span::raw(content),
-            ]);
+            ];
+            
+            // Parse markdown formatting and add styled spans
+            message_spans.extend(parse_markdown(&content));
+            
+            let line = Line::from(message_spans);
             lines.push(line);
         }
     }
@@ -355,4 +359,112 @@ fn draw_input_area(f: &mut Frame, app: &mut App, area: Rect) {
             inner_area.y + cursor_y,
         );
     }
+}
+
+/// Parse markdown formatting in text and return styled spans
+/// Supports **bold** and *italic* formatting
+fn parse_markdown(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    let mut current_text = String::new();
+    
+    while let Some((i, ch)) = chars.next() {
+        if ch == '*' {
+            // Check for bold (**text**)
+            if let Some(&(_, '*')) = chars.peek() {
+                // Found **, look for closing **
+                chars.next(); // consume the second *
+                
+                // Add any accumulated text as normal span
+                if !current_text.is_empty() {
+                    spans.push(Span::raw(current_text.clone()));
+                    current_text.clear();
+                }
+                
+                // Find closing **
+                let remaining_text = &text[i + 2..];
+                if let Some(end_pos) = find_closing_bold(remaining_text) {
+                    let bold_text = &remaining_text[..end_pos];
+                    spans.push(Span::styled(
+                        bold_text.to_string(),
+                        Style::default().add_modifier(Modifier::BOLD)
+                    ));
+                    
+                    // Skip ahead past the closing **
+                    let skip_chars = bold_text.len() + 2; // +2 for the closing **
+                    for _ in 0..skip_chars {
+                        if chars.next().is_none() {
+                            break;
+                        }
+                    }
+                } else {
+                    // No closing **, treat as literal
+                    current_text.push_str("**");
+                }
+            } else {
+                // Check for italic (*text*)
+                // Add any accumulated text as normal span
+                if !current_text.is_empty() {
+                    spans.push(Span::raw(current_text.clone()));
+                    current_text.clear();
+                }
+                
+                // Find closing *
+                let remaining_text = &text[i + 1..];
+                if let Some(end_pos) = find_closing_italic(remaining_text) {
+                    let italic_text = &remaining_text[..end_pos];
+                    spans.push(Span::styled(
+                        italic_text.to_string(),
+                        Style::default().add_modifier(Modifier::ITALIC)
+                    ));
+                    
+                    // Skip ahead past the closing *
+                    let skip_chars = italic_text.len() + 1; // +1 for the closing *
+                    for _ in 0..skip_chars {
+                        if chars.next().is_none() {
+                            break;
+                        }
+                    }
+                } else {
+                    // No closing *, treat as literal
+                    current_text.push('*');
+                }
+            }
+        } else {
+            current_text.push(ch);
+        }
+    }
+    
+    // Add any remaining text
+    if !current_text.is_empty() {
+        spans.push(Span::raw(current_text));
+    }
+    
+    // If no spans were created, return the original text as a single span
+    if spans.is_empty() {
+        spans.push(Span::raw(text.to_string()));
+    }
+    
+    spans
+}
+
+/// Find the position of closing ** for bold text
+fn find_closing_bold(text: &str) -> Option<usize> {
+    let mut chars = text.char_indices().peekable();
+    
+    while let Some((i, ch)) = chars.next() {
+        if ch == '*' {
+            if let Some(&(_, '*')) = chars.peek() {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Find the position of closing * for italic text  
+fn find_closing_italic(text: &str) -> Option<usize> {
+    text.char_indices()
+        .find(|(_, ch)| *ch == '*')
+        .map(|(i, _)| i)
 }

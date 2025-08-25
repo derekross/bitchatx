@@ -618,7 +618,7 @@ impl App {
     }
     
     async fn handle_command(&mut self, input: &str) -> Result<()> {
-        let parts: Vec<&str> = input[1..].split_whitespace().collect();
+        let parts = self.parse_command_args(&input[1..]);
         if parts.is_empty() {
             return Ok(());
         }
@@ -629,7 +629,7 @@ impl App {
                     self.add_status_message("Usage: /join <geohash>".to_string());
                     return Ok(());
                 }
-                self.join_channel(parts[1]).await?;
+                self.join_channel(&parts[1]).await?;
             }
             "leave" | "part" | "l" => {
                 if let Some(channel) = &self.current_channel.clone() {
@@ -647,14 +647,14 @@ impl App {
                     self.add_status_message("Usage: /nick <nickname>".to_string());
                     return Ok(());
                 }
-                self.change_nickname(parts[1]).await?;
+                self.change_nickname(&parts[1]).await?;
             }
             "msg" | "m" => {
                 if parts.len() < 3 {
                     self.add_status_message("Usage: /msg <channel/nickname> <message>".to_string());
                     return Ok(());
                 }
-                let target = parts[1];
+                let target = &parts[1];
                 let message_content = parts[2..].join(" ");
                 self.send_msg_to_target(target, &message_content).await?;
             }
@@ -669,8 +669,8 @@ impl App {
                     self.add_status_message("Usage: /hug <nickname>".to_string());
                     return Ok(());
                 }
-                let nickname = parts[1];
-                let hug_message = format!("* {} hugs {} 🫂", self.identity.nickname, nickname);
+                let nickname = &parts[1];
+                let hug_message = format!("* {} hugs {} 🫂 *", self.identity.nickname, nickname);
                 self.send_action_message(&hug_message).await?;
             }
             "slap" => {
@@ -678,8 +678,8 @@ impl App {
                     self.add_status_message("Usage: /slap <nickname>".to_string());
                     return Ok(());
                 }
-                let nickname = parts[1];
-                let slap_message = format!("* {} slaps {} around a bit with a large trout 🐟", self.identity.nickname, nickname);
+                let nickname = &parts[1];
+                let slap_message = format!("* {} slaps {} around a bit with a large trout 🐟 *", self.identity.nickname, nickname);
                 self.send_action_message(&slap_message).await?;
             }
             "block" => {
@@ -713,7 +713,7 @@ impl App {
                 if parts.len() < 2 {
                     self.add_message_to_current_channel("Usage: /spam <list|unmute|status>".to_string());
                 } else {
-                    match parts[1] {
+                    match parts[1].as_str() {
                         "list" => {
                             self.list_auto_muted_users();
                         }
@@ -1335,7 +1335,12 @@ impl App {
                 // For /msg and /m commands, use space instead of ": "
                 format!("{} ", replacement)
             } else if is_action_command {
-                replacement.to_string()
+                // For action commands, wrap nicknames with spaces in quotes
+                if replacement.contains(' ') {
+                    format!("\"{}\"", replacement)
+                } else {
+                    replacement.to_string()
+                }
             } else {
                 // Regular nickname completion gets ": "
                 format!("{}: ", replacement)
@@ -1506,6 +1511,38 @@ impl App {
         // Check if we're completing arguments for /msg or /m commands
         let input = self.input.trim_start();
         input.starts_with("/msg ") || input.starts_with("/m ")
+    }
+    
+    /// Parse command arguments, handling quoted strings properly
+    fn parse_command_args(&self, input: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current_arg = String::new();
+        let mut in_quotes = false;
+        let mut chars = input.chars().peekable();
+        
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    in_quotes = !in_quotes;
+                }
+                ' ' if !in_quotes => {
+                    if !current_arg.is_empty() {
+                        args.push(current_arg.clone());
+                        current_arg.clear();
+                    }
+                }
+                _ => {
+                    current_arg.push(ch);
+                }
+            }
+        }
+        
+        // Add the last argument if not empty
+        if !current_arg.is_empty() {
+            args.push(current_arg);
+        }
+        
+        args
     }
     
     fn scroll_to_bottom(&mut self) {
