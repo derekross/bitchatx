@@ -120,8 +120,8 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("Error: {:?}", err);
+    if let Err(_err) = res {
+        // Error handling could be improved here
     }
 
     Ok(())
@@ -133,7 +133,7 @@ async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app
 
     loop {
         terminal.draw(|f| {
-            ui::draw(f, app)
+            ui::draw(f, &mut *app)
         })?;
 
         let timeout_duration = tick_rate

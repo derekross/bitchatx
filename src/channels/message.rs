@@ -31,7 +31,7 @@ impl Message {
     pub fn format_for_display(&self) -> String {
         format!(
             "[{}] <{}> {}",
-            self.timestamp.format("%H:%M:%S"),
+            self.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S"),
             self.nickname,
             self.content
         )

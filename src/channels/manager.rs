@@ -108,6 +108,12 @@ impl ChannelManager {
             .unwrap_or(0)
     }
     
+    pub fn get_active_user_count(&self, geohash: &str) -> usize {
+        self.channels.get(geohash)
+            .map(|c| c.get_participant_count())
+            .unwrap_or(0)
+    }
+    
     pub fn get_active_channel_count(&self) -> usize {
         self.channels.len()
     }

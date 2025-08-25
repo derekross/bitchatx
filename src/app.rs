@@ -31,6 +31,7 @@ pub struct App {
     pub input: String,
     pub cursor_position: usize,
     pub scroll_offset: usize,
+    pub input_horizontal_scroll: usize,
     pub should_autoscroll: bool,
     
     // Nostr client
@@ -68,18 +69,10 @@ pub struct TabCompletionState {
 impl App {
     pub async fn new(nsec: Option<&str>, auto_channel: Option<&str>) -> Result<Self> {
         let identity = if let Some(nsec_str) = nsec {
-            // Show loading message for profile fetch
-            eprintln!("🔍 Fetching your Nostr profile...");
             match Identity::from_nsec(nsec_str).await {
-                Ok(identity) => {
-                    eprintln!("✅ Profile loaded: {}", identity.nickname);
-                    identity
-                }
-                Err(e) => {
-                    eprintln!("⚠️  Profile fetch failed: {}", e);
-                    return Err(e);
-                }
-            }
+            Ok(identity) => identity,
+            Err(e) => return Err(e),
+        }
         } else {
             Identity::ephemeral()
         };
@@ -97,6 +90,7 @@ impl App {
             input: String::new(),
             cursor_position: 0,
             scroll_offset: 0,
+            input_horizontal_scroll: 0,
             should_autoscroll: true,
             
             nostr_client,
@@ -241,11 +235,13 @@ impl App {
                         self.submit_input().await?;
                         self.input.clear();
                         self.cursor_position = 0;
+                        self.input_horizontal_scroll = 0;
                         // Stay in input mode after sending message
                     }
                     KeyCode::Esc => {
                         self.input.clear();
                         self.cursor_position = 0;
+                        self.input_horizontal_scroll = 0;
                         self.input_mode = InputMode::Normal;
                     }
                     KeyCode::Char(c) => {
@@ -253,6 +249,9 @@ impl App {
                         self.tab_completion_state = None;
                         self.input.insert(self.cursor_position, c);
                         self.cursor_position += 1;
+                        
+                        // Update horizontal scroll to keep cursor visible
+                        self.update_input_scroll();
                     }
                     KeyCode::Tab => {
                         self.handle_tab_completion().await;
@@ -262,24 +261,31 @@ impl App {
                         if self.cursor_position > 0 {
                             self.input.remove(self.cursor_position - 1);
                             self.cursor_position -= 1;
+                            
+                            // Update horizontal scroll when deleting
+                            self.update_input_scroll();
                         }
                     }
                     KeyCode::Delete => {
                         self.tab_completion_state = None;
                         if self.cursor_position < self.input.len() {
                             self.input.remove(self.cursor_position);
+                            // Update horizontal scroll when deleting
+                            self.update_input_scroll();
                         }
                     }
                     KeyCode::Left => {
                         self.tab_completion_state = None;
                         if self.cursor_position > 0 {
                             self.cursor_position -= 1;
+                            self.update_input_scroll();
                         }
                     }
                     KeyCode::Right => {
                         self.tab_completion_state = None;
                         if self.cursor_position < self.input.len() {
                             self.cursor_position += 1;
+                            self.update_input_scroll();
                         }
                     }
                     KeyCode::Up => {
@@ -302,9 +308,11 @@ impl App {
                     }
                     KeyCode::Home => {
                         self.cursor_position = 0;
+                        self.update_input_scroll();
                     }
                     KeyCode::End => {
                         self.cursor_position = self.input.len();
+                        self.update_input_scroll();
                     }
                     // Explicitly ignore other keys to prevent exiting edit mode
                     KeyCode::F(_) => {}  // Function keys
@@ -536,9 +544,9 @@ impl App {
         } else {
             self.add_status_message("Joined channels:".to_string());
             for channel in channels {
-                let message_count = self.channel_manager.get_message_count(&channel);
+                let active_users = self.channel_manager.get_active_user_count(&channel);
                 let indicator = if Some(&channel) == self.current_channel.as_ref() { "*" } else { " " };
-                self.add_status_message(format!("{}#{} ({} messages)", indicator, channel, message_count));
+                self.add_status_message(format!("{}#{} ({} users)", indicator, channel, active_users));
             }
         }
     }
@@ -558,7 +566,7 @@ impl App {
                     .iter()
                     .filter(|msg| msg.timestamp >= ten_minutes_ago)
                     .map(|msg| {
-                        let timestamp = msg.timestamp.format("%H:%M:%S");
+                        let timestamp = msg.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S");
                         format!("[{}] <{}> {}", timestamp, msg.nickname, msg.content)
                     })
                     .collect();
@@ -765,23 +773,56 @@ impl App {
         }
     }
     
-    pub fn get_visible_messages(&self, height: usize) -> Vec<&Message> {
+    pub fn get_visible_messages(&self, height: usize) -> (Vec<(String, String, String, bool)>, usize) {
         if let Some(channel) = self.get_current_channel() {
-            // Return only recent messages for better UI performance
-            // Limit to 2x viewport height to prevent UI slowdown
-            let max_visible = height.max(100) * 2; // At least 200 messages, but no more than 2x screen
             let message_count = channel.messages.len();
             
-            if message_count <= max_visible {
-                // If we have few messages, return all
-                channel.messages.iter().collect()
-            } else {
-                // If we have many messages, return only the most recent ones
-                let start_index = message_count - max_visible;
-                channel.messages[start_index..].iter().collect()
+            if message_count == 0 {
+                return (vec![], 0);
             }
+            
+            // Calculate how many messages to show based on scroll position and viewport
+            let viewport_height = height;
+            let total_messages = channel.messages.len();
+            
+            // Calculate proper scroll offset, handling autoscroll and bounds checking
+            let corrected_scroll_offset = if self.should_autoscroll {
+                // Auto-scroll: show the most recent messages
+                if total_messages > viewport_height {
+                    total_messages - viewport_height
+                } else {
+                    0
+                }
+            } else {
+                // Manual scroll: respect user's scroll position but keep it valid
+                if self.scroll_offset >= total_messages {
+                    if total_messages > viewport_height {
+                        total_messages - viewport_height
+                    } else {
+                        0
+                    }
+                } else {
+                    self.scroll_offset
+                }
+            };
+            
+            // Calculate range of messages to display
+            let start_index = corrected_scroll_offset;
+            let end_index = (start_index + viewport_height).min(total_messages);
+            
+            // Convert messages to owned data and return with the corrected offset
+            let message_data: Vec<_> = channel.messages[start_index..end_index]
+                .iter()
+                .map(|msg| (
+                    msg.timestamp.with_timezone(&chrono::Local).format("%H:%M:%S").to_string(),
+                    msg.nickname.clone(),
+                    msg.content.clone(),
+                    msg.is_own
+                ))
+                .collect();
+            (message_data, corrected_scroll_offset)
         } else {
-            vec![]
+            (vec![], 0)
         }
     }
     
@@ -997,14 +1038,17 @@ impl App {
     }
     
     fn scroll_to_bottom(&mut self) {
+        // This will be called with the actual viewport height from the UI
+        self.scroll_to_bottom_with_height(25); // Default fallback
+    }
+    
+    pub fn scroll_to_bottom_with_height(&mut self, viewport_height: usize) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            // Estimate visible height - most terminals show ~25 lines for messages
-            let visible_height = 25;
             
             // Scroll to show the most recent messages at the bottom
-            if message_count > visible_height {
-                self.scroll_offset = message_count.saturating_sub(visible_height);
+            if message_count > viewport_height {
+                self.scroll_offset = message_count.saturating_sub(viewport_height);
             } else {
                 // If all messages fit on screen, show from beginning
                 self.scroll_offset = 0;
@@ -1012,13 +1056,20 @@ impl App {
         }
     }
     
+    pub fn update_scroll_offset(&mut self, new_offset: usize) {
+        self.scroll_offset = new_offset;
+    }
+    
     fn update_autoscroll_status(&mut self) {
+        self.update_autoscroll_status_with_height(25); // Default fallback
+    }
+    
+    pub fn update_autoscroll_status_with_height(&mut self, viewport_height: usize) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            let visible_height = 25;
             
             // If we're at or near bottom, re-enable auto-scrolling
-            let bottom_threshold = message_count.saturating_sub(visible_height);
+            let bottom_threshold = message_count.saturating_sub(viewport_height);
             if self.scroll_offset >= bottom_threshold.saturating_sub(5) {
                 self.should_autoscroll = true;
             }
@@ -1239,6 +1290,21 @@ impl App {
             None => {
                 self.add_message_to_current_channel(format!("No information found for user '{}'", nickname));
             }
+        }
+    }
+    
+    /// Update input horizontal scroll to keep cursor visible
+    fn update_input_scroll(&mut self) {
+        // Estimate visible width for input area (typically terminal width - borders)
+        let visible_width = 80; // Conservative estimate
+        
+        // If cursor is beyond visible area, scroll horizontally
+        if self.cursor_position > self.input_horizontal_scroll + visible_width {
+            self.input_horizontal_scroll = self.cursor_position - visible_width + 10; // Keep some context
+        }
+        // If cursor is far behind scroll position, scroll back
+        else if self.cursor_position < self.input_horizontal_scroll {
+            self.input_horizontal_scroll = self.cursor_position.saturating_sub(10); // Keep some context
         }
     }
 }

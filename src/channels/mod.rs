@@ -67,17 +67,24 @@ impl Channel {
         }
         
         // Insert message in timestamp order (newer messages at the end)
-        let insert_pos = self.messages.binary_search_by(|existing| {
-            existing.timestamp.cmp(&message.timestamp)
-        }).unwrap_or_else(|e| e);
-        
-        self.messages.insert(insert_pos, message);
+        // For performance: assume most messages are in chronological order
+        // Just append to end and only sort if timestamp is out of order
+        if self.messages.last().map_or(true, |last| last.timestamp <= message.timestamp) {
+            // Fast path: message is in order, just append
+            self.messages.push(message);
+        } else {
+            // Slow path: message is out of order, use binary search
+            let insert_pos = self.messages.binary_search_by(|existing| {
+                existing.timestamp.cmp(&message.timestamp)
+            }).unwrap_or_else(|e| e);
+            self.messages.insert(insert_pos, message);
+        }
         self.last_activity = now;
         
-        // Keep only last 500 messages per channel (reduced from 1000 for better performance)
-        if self.messages.len() > 500 {
+        // Keep only last 250 messages per channel (reduced for better performance)
+        if self.messages.len() > 250 {
             // Remove oldest messages in batches for better performance
-            let remove_count = self.messages.len() - 500;
+            let remove_count = self.messages.len() - 250;
             self.messages.drain(0..remove_count);
         }
         
@@ -90,7 +97,6 @@ impl Channel {
         self.messages.len()
     }
     
-    #[allow(dead_code)]
     pub fn get_participant_count(&self) -> usize {
         self.participants.len()
     }

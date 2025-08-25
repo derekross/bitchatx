@@ -169,8 +169,6 @@ impl NostrClient {
         
         let subscription_id = self.client.subscribe(vec![filter], None).await;
         self.subscriptions.insert(geohash.to_string(), subscription_id);
-        
-        let _ = self.status_tx.send(format!("DEBUG: Subscribed to channel #{} (24h history, limit 1000)", geohash));
         Ok(())
     }
     

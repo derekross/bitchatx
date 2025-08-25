@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, AppState, InputMode};
 
-pub fn draw(f: &mut Frame<'_>, app: &App) {
+pub fn draw(f: &mut Frame<'_>, app: &mut App) {
     let size = f.size();
     
     // Create main layout
@@ -75,7 +75,7 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(title_paragraph, area);
 }
 
-fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
+fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(if let Some(channel) = &app.current_channel {
@@ -92,15 +92,19 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     
+    let viewport_height = inner.height as usize;
+    
     let mut lines = Vec::new();
     
     if app.current_channel.is_some() {
-        // Show channel messages
-        let visible_messages = app.get_visible_messages(inner.height as usize);
+        // Show channel messages with automatic scroll handling
+        let (visible_messages, corrected_scroll_offset) = app.get_visible_messages(viewport_height);
         
-        for message in visible_messages {
-            let timestamp = message.timestamp.format("%H:%M:%S");
-            let nick_color = if message.is_own { 
+        // Update the app's scroll offset if it was corrected
+        app.update_scroll_offset(corrected_scroll_offset);
+        
+        for (timestamp, nickname, content, is_own) in visible_messages {
+            let nick_color = if is_own { 
                 Color::Green 
             } else { 
                 Color::Magenta 
@@ -108,8 +112,8 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
             
             let line = Line::from(vec![
                 Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::Gray)),
-                Span::styled(format!("<{}> ", message.nickname), Style::default().fg(nick_color)),
-                Span::raw(&message.content),
+                Span::styled(format!("<{}> ", nickname), Style::default().fg(nick_color)),
+                Span::raw(content),
             ]);
             lines.push(line);
         }
@@ -237,11 +241,11 @@ fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().fg(Color::Gray)  // Different color for listening-only channels
             };
             
-            let message_count = app.channel_manager.get_message_count(&channel);
+            let active_users = app.channel_manager.get_active_user_count(&channel);
             let channel_label = if is_joined {
-                format!("#{} ({})", channel, message_count)
+                format!("#{} ({})", channel, active_users)
             } else {
-                format!("#{} ({})", channel, message_count)  // Show message count for all channels
+                format!("#{} ({})", channel, active_users)  // Show active user count for all channels
             };
             all_channels.push(ListItem::new(channel_label).style(style));
         }
@@ -291,15 +295,20 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     
     let input_paragraph = Paragraph::new(input_text)
         .block(input_block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((0, app.input_horizontal_scroll as u16));
         
     f.render_widget(input_paragraph, area);
     
     // Set cursor position when in editing mode
     if app.input_mode == InputMode::Editing {
+        // Calculate cursor position with horizontal scrolling
+        let cursor_x = (app.cursor_position as i16 - app.input_horizontal_scroll as i16 + 1).max(0) as u16;
+        let cursor_y = 1; // Keep cursor on first line for now
+        
         f.set_cursor(
-            area.x + app.cursor_position as u16 + 1,
-            area.y + 1,
+            area.x + cursor_x,
+            area.y + cursor_y,
         );
     }
 }
