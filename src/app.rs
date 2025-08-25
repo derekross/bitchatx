@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
-use rand::prelude::*;
+use rand::{thread_rng, Rng};
 
 use crate::channels::{ChannelManager, Message, Channel};
 use crate::nostr::{NostrClient, Identity};
@@ -787,18 +787,23 @@ impl App {
             "The purple pill helps the orange pill go down.",
             "Nostr is the protocol that binds all of your applications together.",
             "GM. PV.",
-            "Nost fixes this.",
+            "Nostr fixes this.",
             "Decentralized social media is not a bug, it's a feature.",
-            "My keys, my keys, my kingdom for my keys!",
+            "Protocols, not platforms.",
             "Relays gonna relay.",
             "In Nostr we trust.",
             "Kind 1 is the message, kind 3 is the medium.",
-            "To the moon!",
-            "Not your keys, not your crypto.",
-            "Web5 is just Nostr with extra steps.",
+            "GM Fiatjaf.",
+            "Not your keys, not your identity.",
+            "Web3 is a VC backed scam. Nostr is the future.",
         ];
         
-        let random_quote = quotes[rand::random::<usize>() % quotes.len()];
+        let random_quote = if quotes.is_empty() {
+            "No quotes available."
+        } else {
+            let index = rand::thread_rng().gen_range(0..quotes.len());
+            &quotes[index]
+        };
         
         let version_message = format!(
             "Running BitchatX version {} by Derek Ross. {}", 
