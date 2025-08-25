@@ -6,6 +6,7 @@ use super::{Channel, Message};
 
 pub struct ChannelManager {
     channels: HashMap<String, Channel>,
+    #[allow(dead_code)]
     message_tx: mpsc::UnboundedSender<Message>,
 }
 

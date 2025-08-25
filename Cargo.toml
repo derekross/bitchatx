@@ -28,6 +28,7 @@ anyhow = "1.0"
 uuid = { version = "1.0", features = ["v4"] }
 dirs = "5.0"
 toml = "0.8"
+arboard = "3.4"
 
 
 # Crypto and Random
@@ -42,8 +43,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
-
-[target.x86_64-apple-darwin]
-linker = "cc"

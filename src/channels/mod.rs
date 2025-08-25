@@ -15,7 +15,9 @@ mod message;
 
 #[derive(Debug, Clone)]
 pub struct Channel {
+    #[allow(dead_code)]
     pub name: String,
+    #[allow(dead_code)]
     pub geohash: String,
     pub messages: Vec<Message>,
     pub participants: HashMap<String, Participant>,
@@ -86,11 +88,13 @@ impl Channel {
         self.messages.len()
     }
     
+    #[allow(dead_code)]
     pub fn get_participant_count(&self) -> usize {
         self.participants.len()
     }
     
     /// Get active participants sorted by recent activity
+    #[allow(dead_code)]
     pub fn get_active_participants(&self) -> Vec<&Participant> {
         let mut participants: Vec<&Participant> = self.participants.values().collect();
         // Sort by last activity (most recent first)

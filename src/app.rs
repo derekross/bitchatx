@@ -3,14 +3,17 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 use rand::Rng;
 use std::collections::HashSet;
+use arboard::Clipboard;
 
 use crate::channels::{ChannelManager, Message, Channel};
 use crate::nostr::{NostrClient, Identity};
+use nostr::{PublicKey, ToBech32};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppState {
     Connecting,
     Connected,
+    #[allow(dead_code)]
     Disconnected,
     Error(String),
 }
@@ -52,8 +55,11 @@ pub struct App {
 
 #[derive(Debug, Clone)]
 pub struct TabCompletionState {
+    #[allow(dead_code)]
     original_input: String,
+    #[allow(dead_code)]
     original_cursor: usize,
+    #[allow(dead_code)]
     prefix: String,
     pub matches: Vec<String>,
     pub current_match_index: usize,
@@ -111,8 +117,15 @@ impl App {
         }
         
         // Start Nostr client
-        app.nostr_client.connect().await?;
-        app.state = AppState::Connected;
+        match app.nostr_client.connect().await {
+            Ok(()) => {
+                app.state = AppState::Connected;
+            }
+            Err(e) => {
+                app.state = AppState::Error(format!("Connection failed: {}", e));
+                app.add_status_message(format!("Connection error: {}", e));
+            }
+        }
         
         Ok(app)
     }
@@ -126,8 +139,7 @@ impl App {
     }
     
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<()> {
-        // Ignore key events with modifiers (except Shift for some keys)
-        // This prevents Ctrl+C, Ctrl+D, etc. from causing unexpected behavior
+        // Handle modifier key combinations
         if !key.modifiers.is_empty() {
             match key.modifiers {
                 KeyModifiers::SHIFT => {
@@ -136,8 +148,41 @@ impl App {
                         return Ok(());
                     }
                 }
+                KeyModifiers::CONTROL => {
+                    // Handle Ctrl key combinations for clipboard operations
+                    match key.code {
+                        KeyCode::Char('c') => {
+                            if self.input_mode == InputMode::Editing {
+                                self.copy_to_clipboard();
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Char('v') => {
+                            if self.input_mode == InputMode::Editing {
+                                self.paste_from_clipboard();
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Char('x') => {
+                            if self.input_mode == InputMode::Editing {
+                                self.cut_to_clipboard();
+                            }
+                            return Ok(());
+                        }
+                        KeyCode::Char('a') => {
+                            if self.input_mode == InputMode::Editing {
+                                self.select_all();
+                            }
+                            return Ok(());
+                        }
+                        _ => {
+                            // Ignore other Ctrl combinations
+                            return Ok(());
+                        }
+                    }
+                }
                 _ => {
-                    // Ignore all other modifier combinations (Ctrl, Alt, etc.)
+                    // Ignore all other modifier combinations (Alt, etc.)
                     return Ok(());
                 }
             }
@@ -372,6 +417,14 @@ impl App {
                     self.add_status_message("Usage: /unblock <nickname>".to_string());
                 }
             }
+            "whois" | "w" => {
+                if parts.len() > 1 {
+                    let nickname = parts[1].trim_start_matches('@');
+                    self.whois_user(nickname).await;
+                } else {
+                    self.add_status_message("Usage: /whois <nickname>".to_string());
+                }
+            }
             "version" => {
                 self.show_version().await?;
             }
@@ -469,21 +522,6 @@ impl App {
         }
     }
     
-    fn list_all_channels(&mut self) {
-        let channels = self.channel_manager.list_all_channels();
-        if channels.is_empty() {
-            self.add_status_message("No channels available".to_string());
-        } else {
-            self.add_status_message("All channels (joined + listening):".to_string());
-            for (channel, is_joined) in channels {
-                let message_count = self.channel_manager.get_message_count(&channel);
-                let indicator = if Some(&channel) == self.current_channel.as_ref() { "*" } else { " " };
-                let status = if is_joined { "joined" } else { "listening" };
-                self.add_status_message(format!("{}#{} ({} messages, {})", indicator, channel, message_count, status));
-            }
-        }
-    }
-    
     async fn show_all_recent_messages(&mut self) {
         let ten_minutes_ago = chrono::Utc::now() - chrono::Duration::minutes(10);
         
@@ -554,6 +592,7 @@ impl App {
             "/slap <nickname> - Slap someone with a large trout".to_string(),
             "/block [nickname] - Block user or list blocked users".to_string(),
             "/unblock <nickname> - Unblock a user".to_string(),
+            "/whois, /w <nickname> - Show user information (npub, channels)".to_string(),
             "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
@@ -565,6 +604,7 @@ impl App {
             "Tab - Nickname completion (input mode), Switch channels (normal mode)".to_string(),
             "Channel switching: Esc then Tab to cycle through channels".to_string(),
             "Page Up/Down - Fast scroll, Home/End - Cursor start/end".to_string(),
+            "Clipboard: Ctrl+C - Copy, Ctrl+V - Paste, Ctrl+X - Cut, Ctrl+A - Select All".to_string(),
         ];
         
         for line in help_text {
@@ -902,9 +942,10 @@ impl App {
     }
     
     fn is_action_command_context(&self, _word_start_pos: usize) -> bool {
-        // Simple check: if input starts with /hug or /slap, we're in action command context
+        // Simple check: if input starts with /hug, /slap, /block, or /unblock, we're in action command context
         let input = self.input.trim_start();
-        input.starts_with("/hug ") || input.starts_with("/slap ")
+        input.starts_with("/hug ") || input.starts_with("/slap ") || 
+        input.starts_with("/block ") || input.starts_with("/unblock ")
     }
     
     fn scroll_to_bottom(&mut self) {
@@ -940,6 +981,8 @@ impl App {
         if let Some(pubkey) = self.find_pubkey_for_nickname(nickname).await {
             if self.blocked_users.insert(pubkey.clone()) {
                 self.add_status_message(format!("Blocked user {}", nickname));
+                // Add system message to current channel to announce the block
+                self.add_message_to_current_channel(format!("* {} has blocked {}", self.identity.nickname, nickname));
             } else {
                 self.add_status_message(format!("User {} is already blocked", nickname));
             }
@@ -953,6 +996,8 @@ impl App {
         if let Some(pubkey) = self.find_pubkey_for_nickname(nickname).await {
             if self.blocked_users.remove(&pubkey) {
                 self.add_status_message(format!("Unblocked user {}", nickname));
+                // Add system message to current channel to announce the unblock
+                self.add_message_to_current_channel(format!("* {} has unblocked {}", self.identity.nickname, nickname));
             } else {
                 self.add_status_message(format!("User {} is not blocked", nickname));
             }
@@ -964,6 +1009,8 @@ impl App {
                     if nick.eq_ignore_ascii_case(nickname) {
                         self.blocked_users.remove(&pubkey);
                         self.add_status_message(format!("Unblocked user {}", nickname));
+                        // Add system message to current channel to announce the unblock
+                        self.add_message_to_current_channel(format!("* {} has unblocked {}", self.identity.nickname, nickname));
                         found_and_removed = true;
                         break;
                     }
@@ -1036,6 +1083,113 @@ impl App {
             self.blocked_users.contains(pk)
         } else {
             false
+        }
+    }
+    
+    #[allow(dead_code)]
+    pub fn handle_connection_lost(&mut self) {
+        self.state = AppState::Disconnected;
+        self.add_status_message("Connection lost. Attempting to reconnect...".to_string());
+    }
+    
+    #[allow(dead_code)]
+    pub fn handle_connection_error(&mut self, error: String) {
+        self.state = AppState::Error(error.clone());
+        self.add_status_message(format!("Connection error: {}", error));
+    }
+    
+    fn copy_to_clipboard(&self) {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if let Err(_) = clipboard.set_text(self.input.clone()) {
+                // Silently fail if clipboard access fails
+            }
+        }
+    }
+    
+    fn paste_from_clipboard(&mut self) {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if let Ok(text) = clipboard.get_text() {
+                // Insert clipboard text at cursor position
+                let before = &self.input[..self.cursor_position];
+                let after = &self.input[self.cursor_position..];
+                self.input = format!("{}{}{}", before, text, after);
+                self.cursor_position += text.len();
+            }
+        }
+    }
+    
+    fn cut_to_clipboard(&mut self) {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if let Err(_) = clipboard.set_text(self.input.clone()) {
+                // Silently fail if clipboard access fails
+            }
+            self.input.clear();
+            self.cursor_position = 0;
+        }
+    }
+    
+    fn select_all(&mut self) {
+        // Move cursor to end (simulates selecting all)
+        self.cursor_position = self.input.len();
+    }
+    
+    async fn whois_user(&mut self, nickname: &str) {
+        // Search through all channels to find user information
+        let mut user_info = None;
+        let mut relay_info = Vec::new();
+        
+        // Look through all channels for this user
+        let all_channels = self.get_all_channels();
+        for channel_name in all_channels {
+            if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
+                // Find most recent message from this user
+                for message in channel.messages.iter().rev() {
+                    if message.nickname.eq_ignore_ascii_case(nickname) {
+                        if let Some(ref pubkey) = message.pubkey {
+                            // Convert pubkey to npub format
+                            let npub = match PublicKey::from_hex(pubkey) {
+                                Ok(pk) => pk.to_bech32().unwrap_or_else(|_| "invalid".to_string()),
+                                Err(_) => "invalid".to_string(),
+                            };
+                            
+                            user_info = Some((message.nickname.clone(), pubkey.clone(), npub));
+                            
+                            // For now, we don't have detailed relay info, so we'll show basic info
+                            // In a full implementation, this would come from the Nostr client
+                            if !relay_info.contains(&channel_name) {
+                                relay_info.push(channel_name.clone());
+                            }
+                        }
+                        break; // Found user info, stop searching this channel
+                    }
+                }
+            }
+        }
+        
+        match user_info {
+            Some((found_nickname, pubkey, npub)) => {
+                self.add_message_to_current_channel("=== WHOIS Information ===".to_string());
+                self.add_message_to_current_channel(format!("Nickname: {}", found_nickname));
+                self.add_message_to_current_channel(format!("NPub: {}", npub));
+                
+                let short_pubkey = if pubkey.len() > 16 { 
+                    format!("{}...{}", &pubkey[..8], &pubkey[pubkey.len()-8..])
+                } else { 
+                    pubkey 
+                };
+                self.add_message_to_current_channel(format!("PubKey: {}", short_pubkey));
+                
+                if relay_info.is_empty() {
+                    self.add_message_to_current_channel("Relays: No recent activity".to_string());
+                } else {
+                    let channels_str = relay_info.join(", #");
+                    self.add_message_to_current_channel(format!("Channels: #{}", channels_str));
+                }
+                self.add_message_to_current_channel("=== End WHOIS ===".to_string());
+            }
+            None => {
+                self.add_message_to_current_channel(format!("No information found for user '{}'", nickname));
+            }
         }
     }
 }
