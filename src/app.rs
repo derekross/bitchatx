@@ -951,14 +951,20 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            let visible_height = 20; // Approximate visible message count (should match UI height)
+            // Use a more conservative visible height estimate. Most terminals show 25-30 lines,
+            // minus UI elements (title bar, input box, status) = ~25 lines for messages
+            let visible_height = 25; 
             
-            // Only scroll if we have more messages than can fit on screen
-            if message_count > visible_height {
-                // Set scroll_offset to show bottom messages
+            // Only scroll if we have significantly more messages than can fit on screen
+            // Add a buffer so messages go further down before scrolling starts
+            let scroll_buffer = 3; // Allow 3 extra messages before scrolling
+            let scroll_threshold = visible_height + scroll_buffer;
+            
+            if message_count > scroll_threshold {
+                // Set scroll_offset to show bottom messages with buffer
                 self.scroll_offset = message_count.saturating_sub(visible_height);
             } else {
-                // If we have fewer messages than screen height, start from beginning
+                // If we have fewer messages than threshold, start from beginning
                 self.scroll_offset = 0;
             }
         }
@@ -967,7 +973,7 @@ impl App {
     fn update_autoscroll_status(&mut self) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            let visible_height = 20; // Approximate visible message count
+            let visible_height = 25; // Match scroll_to_bottom height calculation
             
             // If we're near bottom, re-enable auto-scrolling
             if self.scroll_offset >= message_count.saturating_sub(visible_height) {
