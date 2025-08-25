@@ -1,7 +1,8 @@
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
-use rand::{thread_rng, Rng};
+use rand::Rng;
+use std::collections::HashSet;
 
 use crate::channels::{ChannelManager, Message, Channel};
 use crate::nostr::{NostrClient, Identity};
@@ -44,6 +45,9 @@ pub struct App {
     
     // Tab completion state
     pub tab_completion_state: Option<TabCompletionState>,
+    
+    // Blocking functionality - using pubkey hex strings like Android geohash blocking
+    blocked_users: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +92,7 @@ impl App {
             message_rx,
             status_rx,
             tab_completion_state: None,
+            blocked_users: HashSet::new(),
         };
         
         // Add welcome message to system channel
@@ -350,8 +355,24 @@ impl App {
                 let slap_message = format!("* {} slaps {} around a bit with a large trout", self.identity.nickname, nickname);
                 self.send_action_message(&slap_message).await?;
             }
+            "block" => {
+                if parts.len() > 1 {
+                    let nickname = parts[1].trim_start_matches('@');
+                    self.block_user(nickname).await;
+                } else {
+                    self.list_blocked_users();
+                }
+            }
+            "unblock" => {
+                if parts.len() > 1 {
+                    let nickname = parts[1].trim_start_matches('@');
+                    self.unblock_user(nickname).await;
+                } else {
+                    self.add_status_message("Usage: /unblock <nickname>".to_string());
+                }
+            }
             "version" => {
-                self.show_version();
+                self.show_version().await?;
             }
             "help" | "h" | "commands" => {
                 self.add_status_message("Help command received!".to_string());
@@ -464,12 +485,14 @@ impl App {
     
     async fn show_all_recent_messages(&mut self) {
         let ten_minutes_ago = chrono::Utc::now() - chrono::Duration::minutes(10);
-        let all_channels = self.get_all_channels();
+        
+        // Get all channels (both joined and listening-only) from channel manager
+        let all_channels = self.channel_manager.list_all_channels();
         
         // Collect all recent messages first to avoid borrow issues
-        let mut recent_activity: Vec<(String, Vec<String>)> = Vec::new();
+        let mut recent_activity: Vec<(String, Vec<String>, bool)> = Vec::new();
         
-        for channel_name in all_channels {
+        for (channel_name, is_joined) in all_channels {
             if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
                 let recent_messages: Vec<String> = channel.messages
                     .iter()
@@ -481,35 +504,39 @@ impl App {
                     .collect();
                 
                 if !recent_messages.is_empty() {
-                    recent_activity.push((channel_name, recent_messages));
+                    recent_activity.push((channel_name, recent_messages, is_joined));
                 }
             }
         }
         
+        // Sort by channel name for consistent display
+        recent_activity.sort_by(|a, b| a.0.cmp(&b.0));
+        
         // Now add all status messages
-        self.add_status_message("=== Recent Activity (Last 10 Minutes) ===".to_string());
+        self.add_message_to_current_channel("=== Recent Activity (Last 10 Minutes) ===".to_string());
         
         if recent_activity.is_empty() {
-            self.add_status_message("No recent activity in any channel (last 10 minutes)".to_string());
+            self.add_message_to_current_channel("No recent activity in any geohash channel (last 10 minutes)".to_string());
         } else {
-            for (channel_name, messages) in recent_activity {
-                // Channel header
+            for (channel_name, messages, is_joined) in recent_activity {
+                // Channel header with joined status
                 if channel_name == "system" {
-                    self.add_status_message("--- System Channel ---".to_string());
+                    self.add_message_to_current_channel("--- System Channel ---".to_string());
                 } else {
-                    self.add_status_message(format!("--- Channel #{} ---", channel_name));
+                    let status = if is_joined { "joined" } else { "listening" };
+                    self.add_message_to_current_channel(format!("--- Channel #{} ({}) ---", channel_name, status));
                 }
                 
                 // Show recent messages
                 for message in messages {
-                    self.add_status_message(message);
+                    self.add_message_to_current_channel(message);
                 }
                 
                 // Add separator between channels
-                self.add_status_message("".to_string());
+                self.add_message_to_current_channel("".to_string());
             }
             
-            self.add_status_message("=== End of Recent Activity ===".to_string());
+            self.add_message_to_current_channel("=== End of Recent Activity ===".to_string());
         }
     }
     
@@ -521,9 +548,11 @@ impl App {
             "/msg, /m <channel> <message> - Send message to specific channel".to_string(),
             "/nick, /n <nickname> - Change your display name (session only)".to_string(),
             "/list, /channels - List joined channels".to_string(),
-            "/all - Show recent activity from all channels (last 10 minutes)".to_string(),
+            "/all - Show recent activity from all geohash channels with active users (last 10 minutes)".to_string(),
             "/hug <nickname> - Send a hug to someone 🫂".to_string(),
             "/slap <nickname> - Slap someone with a large trout".to_string(),
+            "/block [nickname] - Block user or list blocked users".to_string(),
+            "/unblock <nickname> - Unblock a user".to_string(),
             "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
@@ -538,7 +567,7 @@ impl App {
         ];
         
         for line in help_text {
-            self.add_status_message(line);
+            self.add_message_to_current_channel(line);
         }
     }
     
@@ -564,10 +593,31 @@ impl App {
         let _ = self.channel_manager.add_message_sync(system_message);
     }
     
+    pub fn add_message_to_current_channel(&mut self, message: String) {
+        // Add system messages to the current channel (or system if no current channel)
+        let target_channel = self.current_channel.clone().unwrap_or_else(|| self.system_channel.clone());
+        let system_message = Message {
+            channel: target_channel,
+            nickname: "system".to_string(),
+            content: message,
+            timestamp: chrono::Local::now().into(),
+            is_own: false,
+            pubkey: None,
+        };
+        
+        // Add directly to channel manager without going through async receiver
+        let _ = self.channel_manager.add_message_sync(system_message);
+    }
+    
     pub async fn on_tick(&mut self) -> Result<()> {
         // Process incoming messages
         let mut new_messages_count = 0;
         while let Ok(message) = self.message_rx.try_recv() {
+            // Filter out messages from blocked users (like Android app's MeshDelegateHandler)
+            if self.is_user_blocked(&message.pubkey) {
+                continue; // Skip blocked messages entirely
+            }
+            
             self.channel_manager.add_message(message).await;
             new_messages_count += 1;
         }
@@ -727,8 +777,9 @@ impl App {
         if let Some((_, start_pos, end_pos)) = self.find_current_word() {
             let replacement = &state.matches[state.current_match_index];
             
-            // Check if we're in a slash command context
+            // Check if we're in a slash command context or action command context
             let is_slash_command_context = self.is_slash_command_context(start_pos);
+            let is_action_command = self.is_action_command_context(start_pos);
             
             // Replace the current word with the completion
             let mut chars: Vec<char> = self.input.chars().collect();
@@ -736,8 +787,8 @@ impl App {
             // Remove old word
             chars.drain(start_pos..end_pos);
             
-            // Only add ": " if this is NOT a slash command context
-            let replacement_with_suffix = if is_slash_command_context {
+            // Only add ": " if this is NOT a slash command context or action command
+            let replacement_with_suffix = if is_slash_command_context || is_action_command {
                 replacement.to_string()
             } else {
                 format!("{}: ", replacement)
@@ -755,11 +806,6 @@ impl App {
     
     async fn send_action_message(&mut self, action: &str) -> Result<()> {
         if let Some(channel) = &self.current_channel {
-            if channel == "system" {
-                self.add_status_message("Cannot send actions to system channel".to_string());
-                return Ok(());
-            }
-            
             // Create an action message (similar to regular message but marked as action)
             let message = Message {
                 channel: channel.clone(),
@@ -770,18 +816,23 @@ impl App {
                 is_own: true,
             };
             
-            // Send to Nostr
-            self.nostr_client.send_message(channel, action, &self.identity.nickname).await?;
-            
-            // Add local echo
-            self.channel_manager.add_message_sync(message);
+            if channel == "system" {
+                // For system channel, just show locally without sending to network
+                self.channel_manager.add_message_sync(message);
+            } else {
+                // Send to Nostr for other channels
+                self.nostr_client.send_message(channel, action, &self.identity.nickname).await?;
+                
+                // Add local echo
+                self.channel_manager.add_message_sync(message);
+            }
         } else {
             self.add_status_message("No channel selected".to_string());
         }
         Ok(())
     }
     
-    fn show_version(&mut self) {
+    async fn show_version(&mut self) -> Result<()> {
         let version = env!("CARGO_PKG_VERSION");
         let quotes = vec![
             "The purple pill helps the orange pill go down.",
@@ -810,7 +861,20 @@ impl App {
             version, random_quote
         );
         
-        self.add_status_message(version_message);
+        // Send as regular message to the channel, not system message
+        if let Some(channel) = self.current_channel.clone() {
+            if channel == "system" {
+                // For system channel, just show locally
+                self.add_message_to_current_channel(version_message);
+            } else {
+                // For other channels, send as regular chat message
+                self.send_message(&channel, &version_message).await?;
+            }
+        } else {
+            self.add_status_message("No channel selected".to_string());
+        }
+        
+        Ok(())
     }
     
     fn is_slash_command_context(&self, word_start_pos: usize) -> bool {
@@ -836,13 +900,24 @@ impl App {
         false
     }
     
+    fn is_action_command_context(&self, _word_start_pos: usize) -> bool {
+        // Simple check: if input starts with /hug or /slap, we're in action command context
+        let input = self.input.trim_start();
+        input.starts_with("/hug ") || input.starts_with("/slap ")
+    }
+    
     fn scroll_to_bottom(&mut self) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            if message_count > 0 {
+            let visible_height = 20; // Approximate visible message count (should match UI height)
+            
+            // Only scroll if we have more messages than can fit on screen
+            if message_count > visible_height {
                 // Set scroll_offset to show bottom messages
-                // This will be handled by get_visible_messages logic
-                self.scroll_offset = message_count.saturating_sub(1);
+                self.scroll_offset = message_count.saturating_sub(visible_height);
+            } else {
+                // If we have fewer messages than screen height, start from beginning
+                self.scroll_offset = 0;
             }
         }
     }
@@ -856,6 +931,110 @@ impl App {
             if self.scroll_offset >= message_count.saturating_sub(visible_height) {
                 self.should_autoscroll = true;
             }
+        }
+    }
+    
+    async fn block_user(&mut self, nickname: &str) {
+        // Find pubkey for this nickname in current channel
+        if let Some(pubkey) = self.find_pubkey_for_nickname(nickname).await {
+            if self.blocked_users.insert(pubkey.clone()) {
+                self.add_status_message(format!("Blocked user {}", nickname));
+            } else {
+                self.add_status_message(format!("User {} is already blocked", nickname));
+            }
+        } else {
+            self.add_status_message(format!("User '{}' not found", nickname));
+        }
+    }
+    
+    async fn unblock_user(&mut self, nickname: &str) {
+        // Find pubkey for this nickname in current channel or in blocked list
+        if let Some(pubkey) = self.find_pubkey_for_nickname(nickname).await {
+            if self.blocked_users.remove(&pubkey) {
+                self.add_status_message(format!("Unblocked user {}", nickname));
+            } else {
+                self.add_status_message(format!("User {} is not blocked", nickname));
+            }
+        } else {
+            // Try to find in blocked users by scanning all channels for this nickname
+            let mut found_and_removed = false;
+            for pubkey in self.blocked_users.clone() {
+                if let Some(nick) = self.find_nickname_for_pubkey(&pubkey) {
+                    if nick.eq_ignore_ascii_case(nickname) {
+                        self.blocked_users.remove(&pubkey);
+                        self.add_status_message(format!("Unblocked user {}", nickname));
+                        found_and_removed = true;
+                        break;
+                    }
+                }
+            }
+            if !found_and_removed {
+                self.add_status_message(format!("User '{}' not found", nickname));
+            }
+        }
+    }
+    
+    fn list_blocked_users(&mut self) {
+        if self.blocked_users.is_empty() {
+            self.add_status_message("No blocked users".to_string());
+        } else {
+            self.add_status_message("Blocked users:".to_string());
+            
+            // Clone the blocked users set to avoid borrowing issues
+            let blocked_users_clone = self.blocked_users.clone();
+            for pubkey in blocked_users_clone {
+                // Try to find nickname for this pubkey
+                if let Some(nickname) = self.find_nickname_for_pubkey(&pubkey) {
+                    let short_pubkey = if pubkey.len() > 8 { &pubkey[..8] } else { &pubkey };
+                    self.add_status_message(format!("  {} ({}...)", nickname, short_pubkey));
+                } else {
+                    let short_pubkey = if pubkey.len() > 16 { &pubkey[..16] } else { &pubkey };
+                    self.add_status_message(format!("  {}...", short_pubkey));
+                }
+            }
+        }
+    }
+    
+    async fn find_pubkey_for_nickname(&self, nickname: &str) -> Option<String> {
+        // Search through all channels to find a message from this nickname with a pubkey
+        let all_channels = self.get_all_channels();
+        for channel_name in all_channels {
+            if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
+                for message in &channel.messages {
+                    if message.nickname.eq_ignore_ascii_case(nickname) {
+                        if let Some(ref pubkey) = message.pubkey {
+                            return Some(pubkey.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    fn find_nickname_for_pubkey(&self, pubkey: &str) -> Option<String> {
+        // Search through all channels to find the most recent nickname for this pubkey
+        let all_channels = self.get_all_channels();
+        for channel_name in all_channels {
+            if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
+                // Search in reverse order to get most recent nickname
+                for message in channel.messages.iter().rev() {
+                    if let Some(ref msg_pubkey) = message.pubkey {
+                        if msg_pubkey == pubkey {
+                            return Some(message.nickname.clone());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    
+    pub fn is_user_blocked(&self, pubkey: &Option<String>) -> bool {
+        if let Some(pk) = pubkey {
+            self.blocked_users.contains(pk)
+        } else {
+            false
         }
     }
 }
