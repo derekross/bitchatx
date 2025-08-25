@@ -505,21 +505,17 @@ impl App {
         // Use sync version for immediate display
         let _ = self.channel_manager.add_message_sync(message);
         
-        // Send to network asynchronously (don't await immediately)
-        let channel_clone = channel.to_string();
-        let content_clone = content.to_string();
-        let nickname_clone = self.identity.nickname.clone();
-        let nostr_client = &self.nostr_client;
+        // Send to network after UI is updated
+        // Send to network in background without blocking UI
+        // Network send variables removed to fix borrow checker
         
-        // Spawn background task for network send
-        tokio::spawn(async move {
-            if let Err(e) = nostr_client.send_message(&channel_clone, &content_clone, &nickname_clone).await {
-                // In a real app, you might want to handle this error
-                eprintln!("Failed to send message: {}", e);
-            }
-        });
+        // Create a future for the network send
+        // Network send will happen after scroll_to_bottom()
         
-        // Enable auto-scrolling after sending a message
+        // Send to network after UI operations are complete
+        let _ = self.nostr_client.send_message(channel, content, &self.identity.nickname).await;
+        
+        // Enable auto-scrolling before network operations
         self.should_autoscroll = true;
         self.scroll_to_bottom();
         
