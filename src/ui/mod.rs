@@ -49,8 +49,10 @@ fn draw_title_bar(f: &mut Frame, app: &App, area: Rect) {
     };
     
     let current_channel = app.current_channel.as_deref().unwrap_or("no channel");
+    let version = env!("CARGO_PKG_VERSION");
     let title = format!(
-        " BitchatX v0.1.0 | {} | #{} | {} ",
+        " BitchatX v{} | {} | #{} | {} ",
+        version,
         app.identity.nickname,
         current_channel,
         match &app.state {

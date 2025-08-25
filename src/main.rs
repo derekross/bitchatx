@@ -56,7 +56,8 @@ fn show_startup_logo() {
         }
     }
     
-    println!("\n\x1B[38;5;129m=== BitchatX v0.1.0 - IRC-style Nostr Client ===\x1B[0m");
+    let version = env!("CARGO_PKG_VERSION");
+    println!("\n\x1B[38;5;129m=== BitchatX v{} - IRC-style Nostr Client ===\x1B[0m", version);
     println!("\x1B[38;5;165mInspired by BitchX + Bitchat - Ephemeral Geohash Channels\x1B[0m");
     println!("\x1B[38;5;201mPress any key to continue...\x1B[0m\n");
     

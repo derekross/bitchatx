@@ -96,7 +96,8 @@ impl App {
         };
         
         // Add welcome message to system channel
-        app.add_status_message("Welcome to BitchatX v0.1.0!".to_string());
+        let version = env!("CARGO_PKG_VERSION");
+        app.add_status_message(format!("Welcome to BitchatX v{}!", version));
         app.add_status_message(format!("Connected as {} ({})",
             app.identity.nickname,
             if nsec.is_some() { "authenticated" } else { "ephemeral" }
