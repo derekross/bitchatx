@@ -492,9 +492,7 @@ impl App {
     }
     
     async fn send_message(&mut self, channel: &str, content: &str) -> Result<()> {
-        self.nostr_client.send_message(channel, content, &self.identity.nickname).await?;
-        
-        // Add local echo
+        // Add local echo immediately for instant feedback
         let message = Message {
             channel: channel.to_string(),
             nickname: self.identity.nickname.clone(),
@@ -504,10 +502,28 @@ impl App {
             is_own: true,
         };
         
-        self.channel_manager.add_message(message).await;
+        // Use sync version for immediate display
+        let _ = self.channel_manager.add_message_sync(message);
+        
+        // Send to network asynchronously (don't await immediately)
+        let channel_clone = channel.to_string();
+        let content_clone = content.to_string();
+        let nickname_clone = self.identity.nickname.clone();
+        let nostr_client = &self.nostr_client;
+        
+        // Spawn background task for network send
+        tokio::spawn(async move {
+            if let Err(e) = nostr_client.send_message(&channel_clone, &content_clone, &nickname_clone).await {
+                // In a real app, you might want to handle this error
+                eprintln!("Failed to send message: {}", e);
+            }
+        });
         
         // Enable auto-scrolling after sending a message
         self.should_autoscroll = true;
+        if self.should_autoscroll {
+            self.scroll_to_bottom();
+        }
         
         Ok(())
     }
@@ -591,6 +607,9 @@ impl App {
     }
     
     async fn show_help(&mut self) {
+        // Enable autoscroll to ensure help text is visible
+        self.should_autoscroll = true;
+        
         let help_text = vec![
             "BitchatX Commands:".to_string(),
             "/join, /j <geohash> - Join a geohash channel".to_string(),
@@ -621,6 +640,9 @@ impl App {
         for line in help_text {
             self.add_message_to_current_channel(line);
         }
+        
+        // Ensure we scroll to bottom after adding help text
+        self.scroll_to_bottom();
     }
     
     fn is_valid_geohash(&self, geohash: &str) -> bool {
@@ -643,6 +665,11 @@ impl App {
         // Add directly to channel manager without going through async receiver
         // This ensures immediate display
         let _ = self.channel_manager.add_message_sync(system_message);
+        
+        // Trigger autoscroll if we're in system channel
+        if self.current_channel.as_deref() == Some(&self.system_channel) && self.should_autoscroll {
+            self.scroll_to_bottom();
+        }
     }
     
     pub fn add_message_to_current_channel(&mut self, message: String) {
@@ -659,6 +686,11 @@ impl App {
         
         // Add directly to channel manager without going through async receiver
         let _ = self.channel_manager.add_message_sync(system_message);
+        
+        // Trigger autoscroll since we added a new message
+        if self.should_autoscroll {
+            self.scroll_to_bottom();
+        }
     }
     
     pub async fn on_tick(&mut self) -> Result<()> {
@@ -738,12 +770,10 @@ impl App {
         }
     }
     
-    pub fn get_visible_messages(&self, height: usize) -> Vec<&Message> {
+    pub fn get_visible_messages(&self, _height: usize) -> Vec<&Message> {
         if let Some(channel) = self.get_current_channel() {
-            let messages = &channel.messages;
-            let start = self.scroll_offset.min(messages.len().saturating_sub(height));
-            let end = (start + height).min(messages.len());
-            messages[start..end].iter().collect()
+            // Return all messages - let the UI widget handle scrolling
+            channel.messages.iter().collect()
         } else {
             vec![]
         }
@@ -962,20 +992,14 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            // Use a more conservative visible height estimate. Most terminals show 25-30 lines,
-            // minus UI elements (title bar, input box, status) = ~25 lines for messages
-            let visible_height = 25; 
+            // Estimate visible height - most terminals show ~25 lines for messages
+            let visible_height = 25;
             
-            // Only scroll if we have significantly more messages than can fit on screen
-            // Add a buffer so messages go further down before scrolling starts
-            let scroll_buffer = 3; // Allow 3 extra messages before scrolling
-            let scroll_threshold = visible_height + scroll_buffer;
-            
-            if message_count > scroll_threshold {
-                // Set scroll_offset to show bottom messages with buffer
+            // Scroll to show the most recent messages at the bottom
+            if message_count > visible_height {
                 self.scroll_offset = message_count.saturating_sub(visible_height);
             } else {
-                // If we have fewer messages than threshold, start from beginning
+                // If all messages fit on screen, show from beginning
                 self.scroll_offset = 0;
             }
         }
@@ -984,10 +1008,11 @@ impl App {
     fn update_autoscroll_status(&mut self) {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
-            let visible_height = 25; // Match scroll_to_bottom height calculation
+            let visible_height = 25;
             
-            // If we're near bottom, re-enable auto-scrolling
-            if self.scroll_offset >= message_count.saturating_sub(visible_height) {
+            // If we're at or near bottom, re-enable auto-scrolling
+            let bottom_threshold = message_count.saturating_sub(visible_height);
+            if self.scroll_offset >= bottom_threshold.saturating_sub(5) {
                 self.should_autoscroll = true;
             }
         }

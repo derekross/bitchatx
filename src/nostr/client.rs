@@ -164,13 +164,13 @@ impl NostrClient {
         let filter = Filter::new()
             .kind(Kind::Ephemeral(20000))
             .custom_tag(SingleLetterTag::lowercase(Alphabet::G), vec![geohash.to_string()])
-            .limit(100)
-            .since(Timestamp::now() - Duration::from_secs(3600)); // Last hour
+            .limit(1000)  // Increased limit
+            .since(Timestamp::now() - Duration::from_secs(86400)); // Last 24 hours instead of 1 hour
         
         let subscription_id = self.client.subscribe(vec![filter], None).await;
         self.subscriptions.insert(geohash.to_string(), subscription_id);
         
-        let _ = self.status_tx.send(format!("Subscribed to channel #{}", geohash));
+        let _ = self.status_tx.send(format!("DEBUG: Subscribed to channel #{} (24h history, limit 1000)", geohash));
         Ok(())
     }
     

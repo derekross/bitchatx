@@ -209,7 +209,7 @@ fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     let connection_paragraph = Paragraph::new(connection_text).block(connection_block);
     f.render_widget(connection_paragraph, chunks[1]);
     
-    // Channel list - show system channel and joined channels
+    // Channel list - show system channel, joined channels, and channels with messages
     let channels_block = Block::default()
         .borders(Borders::ALL)
         .title(" Channels ")
@@ -225,16 +225,25 @@ fn draw_info_panel(f: &mut Frame<'_>, app: &App, area: Rect) {
     };
     all_channels.push(ListItem::new("system").style(system_style));
     
-    // Add joined channels
-    let joined_channels = app.channel_manager.list_channels();
-    for channel in joined_channels {
+    // Add all channels with messages (both joined and listening-only)
+    let all_channel_info = app.channel_manager.list_all_channels();
+    for (channel, is_joined) in all_channel_info {
         if channel != "system" {  // Don't duplicate system channel
             let style = if app.current_channel.as_deref() == Some(&channel) {
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-            } else {
+            } else if is_joined {
                 Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::Gray)  // Different color for listening-only channels
             };
-            all_channels.push(ListItem::new(format!("#{}", channel)).style(style));
+            
+            let message_count = app.channel_manager.get_message_count(&channel);
+            let channel_label = if is_joined {
+                format!("#{} ({})", channel, message_count)
+            } else {
+                format!("#{} ({})", channel, message_count)  // Show message count for all channels
+            };
+            all_channels.push(ListItem::new(channel_label).style(style));
         }
     }
     
