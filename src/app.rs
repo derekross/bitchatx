@@ -68,7 +68,18 @@ pub struct TabCompletionState {
 impl App {
     pub async fn new(nsec: Option<&str>, auto_channel: Option<&str>) -> Result<Self> {
         let identity = if let Some(nsec_str) = nsec {
-            Identity::from_nsec(nsec_str)?
+            // Show loading message for profile fetch
+            eprintln!("🔍 Fetching your Nostr profile...");
+            match Identity::from_nsec(nsec_str).await {
+                Ok(identity) => {
+                    eprintln!("✅ Profile loaded: {}", identity.nickname);
+                    identity
+                }
+                Err(e) => {
+                    eprintln!("⚠️  Profile fetch failed: {}", e);
+                    return Err(e);
+                }
+            }
         } else {
             Identity::ephemeral()
         };

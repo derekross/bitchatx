@@ -25,23 +25,76 @@ impl Identity {
         }
     }
     
-    /// Create identity from nsec private key
-    pub fn from_nsec(nsec: &str) -> Result<Self> {
+    /// Create identity from nsec private key and fetch profile
+    pub async fn from_nsec(nsec: &str) -> Result<Self> {
         let secret_key = SecretKey::from_bech32(nsec)
             .map_err(|e| anyhow!("Invalid nsec format: {}", e))?;
         let keys = Keys::new(secret_key);
-        let pubkey = keys.public_key().to_hex();
+        let pubkey_hex = keys.public_key().to_hex();
+        let pubkey = keys.public_key();
         
-        // For authenticated users, try to fetch their profile name
-        // For now, use a default format
-        let nickname = format!("user{}", &pubkey[..8]);
+        // Try to fetch profile metadata from Nostr relays
+        let nickname = match Self::fetch_profile_name(&pubkey).await {
+            Ok(name) if !name.trim().is_empty() => name,
+            _ => {
+                // Fallback to a user-friendly format if profile fetch fails
+                format!("user{}", &pubkey_hex[..8])
+            }
+        };
         
         Ok(Self {
             keys,
-            pubkey,
+            pubkey: pubkey_hex,
             nickname,
             is_ephemeral: false,
         })
+    }
+    
+    /// Fetch profile name from Nostr relays
+    async fn fetch_profile_name(pubkey: &PublicKey) -> Result<String> {
+        // Create a temporary client to fetch profile metadata
+        let client = Client::default();
+        
+        // Add some popular relays for profile fetching
+        client.add_relay("wss://relay.damus.io").await?;
+        client.add_relay("wss://nos.lol").await?;
+        client.add_relay("wss://relay.nostr.band").await?;
+        
+        client.connect().await;
+        
+        // Create a filter to get the user's profile metadata (kind 0)
+        let metadata_filter = Filter::new()
+            .author(*pubkey)
+            .kind(Kind::Metadata)
+            .limit(1);
+        
+        // Try to get the profile with a timeout
+        let timeout = std::time::Duration::from_secs(3);
+        match tokio::time::timeout(timeout, client.get_events_of(vec![metadata_filter], None)).await {
+            Ok(Ok(events)) => {
+                if let Some(event) = events.first() {
+                    // Parse the metadata JSON
+                    if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(&event.content) {
+                        // Try to get 'name' field, fallback to 'display_name'
+                        if let Some(name) = metadata.get("name").and_then(|n| n.as_str()) {
+                            if !name.trim().is_empty() {
+                                return Ok(name.trim().to_string());
+                            }
+                        }
+                        if let Some(display_name) = metadata.get("display_name").and_then(|n| n.as_str()) {
+                            if !display_name.trim().is_empty() {
+                                return Ok(display_name.trim().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Timeout or error, will use fallback
+            }
+        }
+        
+        Err(anyhow!("No profile name found"))
     }
     
     /// Get the public key as a PublicKey
