@@ -1,13 +1,245 @@
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 use rand::Rng;
 use std::collections::{HashSet, HashMap};
+use std::time::{Duration, Instant};
 use arboard::Clipboard;
 
 use crate::channels::{ChannelManager, Message, Channel};
 use crate::nostr::{NostrClient, Identity};
 use nostr::{PublicKey, ToBech32};
+
+#[derive(Debug)]
+pub struct SpamFilter {
+    // Track message frequency per user (pubkey -> (message_count, first_message_time))
+    user_message_frequency: HashMap<String, (u32, Instant)>,
+    
+    // Recently auto-muted users (pubkey -> mute_time)
+    auto_muted_users: HashMap<String, Instant>,
+    
+    // Spam detection thresholds
+    max_messages_per_minute: u32,
+    duplicate_message_threshold: u32,
+    max_future_time_seconds: u64, // Maximum time into the future allowed
+    max_past_time_hours: u64, // Maximum time into the past allowed (hours)
+    
+    // Track recent messages for duplicate detection (content_hash -> (count, pubkey))
+    recent_message_hashes: HashMap<u64, (u32, String)>,
+    
+    // Common spam patterns (regex would be better but keeping it simple)
+    spam_keywords: Vec<String>,
+}
+
+impl SpamFilter {
+    pub fn new() -> Self {
+        Self {
+            user_message_frequency: HashMap::new(),
+            auto_muted_users: HashMap::new(),
+            max_messages_per_minute: 15, // Allow up to 15 messages per minute
+            duplicate_message_threshold: 3, // Mute after 3 identical messages
+            max_future_time_seconds: 300, // Allow up to 5 minutes into the future
+            max_past_time_hours: 24, // Allow up to 24 hours into the past
+            recent_message_hashes: HashMap::new(),
+            spam_keywords: vec![
+                "🚀🚀🚀".to_string(),
+                "CLICK HERE".to_string(),
+                "FREE MONEY".to_string(),
+                "telegram.me".to_string(),
+                "bit.ly".to_string(),
+                "JOIN NOW".to_string(),
+                "LIMITED TIME".to_string(),
+                "EARN $$$".to_string(),
+                "CRYPTO PUMP".to_string(),
+                "🎰🎰🎰".to_string(),
+            ],
+        }
+    }
+    
+    pub fn is_spam(&mut self, message: &Message) -> bool {
+        let pubkey = match &message.pubkey {
+            Some(pk) => pk,
+            None => return false, // Don't filter messages without pubkey
+        };
+        
+        let now = Instant::now();
+        let current_time = chrono::Utc::now();
+        
+        // Check for future-dated messages (timestamp manipulation)
+        if message.timestamp > current_time + chrono::Duration::seconds(self.max_future_time_seconds as i64) {
+            if self.auto_mute_user(pubkey.clone(), "future timestamp") {
+                // Newly muted for future timestamp spam
+            }
+            return true;
+        }
+        
+        // Check for messages that are too far in the past (can be spam technique)
+        if message.timestamp < current_time - chrono::Duration::hours(self.max_past_time_hours as i64) {
+            if self.auto_mute_user(pubkey.clone(), "old timestamp") {
+                // Newly muted for old timestamp spam
+            }
+            return true;
+        }
+        
+        // Check if user is currently auto-muted
+        if let Some(mute_time) = self.auto_muted_users.get(pubkey) {
+            if now.duration_since(*mute_time) < Duration::from_secs(600) {
+                return true; // Still muted
+            } else {
+                // Mute expired, remove from auto-muted list
+                self.auto_muted_users.remove(pubkey);
+            }
+        }
+        
+        // Check for spam keywords
+        let content_lower = message.content.to_lowercase();
+        for keyword in &self.spam_keywords {
+            if content_lower.contains(&keyword.to_lowercase()) {
+                if self.auto_mute_user(pubkey.clone(), "spam keywords") {
+                    // Return the pubkey for notification (will be handled by caller)
+                }
+                return true;
+            }
+        }
+        
+        // Check message frequency
+        if self.check_message_frequency(pubkey) {
+            if self.auto_mute_user(pubkey.clone(), "high message frequency") {
+                // Return the pubkey for notification (will be handled by caller)
+            }
+            return true;
+        }
+        
+        // Check for duplicate messages
+        if self.check_duplicate_message(message, pubkey) {
+            if self.auto_mute_user(pubkey.clone(), "duplicate messages") {
+                // Return the pubkey for notification (will be handled by caller)
+            }
+            return true;
+        }
+        
+        // Check for all caps spam (more than 20 characters and 80% uppercase)
+        if message.content.len() > 20 {
+            let uppercase_count = message.content.chars().filter(|c| c.is_uppercase()).count();
+            let letter_count = message.content.chars().filter(|c| c.is_alphabetic()).count();
+            if letter_count > 0 && (uppercase_count as f64 / letter_count as f64) > 0.8 {
+                if self.auto_mute_user(pubkey.clone(), "excessive caps") {
+                    // Return the pubkey for notification (will be handled by caller)
+                }
+                return true;
+            }
+        }
+        
+        false
+    }
+    
+    fn check_message_frequency(&mut self, pubkey: &str) -> bool {
+        let now = Instant::now();
+        
+        if let Some((count, first_time)) = self.user_message_frequency.get_mut(pubkey) {
+            if now.duration_since(*first_time) < Duration::from_secs(60) {
+                *count += 1;
+                if *count > self.max_messages_per_minute {
+                    return true; // Spam detected
+                }
+            } else {
+                // Reset counter for new minute
+                *count = 1;
+                *first_time = now;
+            }
+        } else {
+            // First message from this user
+            self.user_message_frequency.insert(pubkey.to_string(), (1, now));
+        }
+        
+        false
+    }
+    
+    fn check_duplicate_message(&mut self, message: &Message, pubkey: &str) -> bool {
+        // Simple hash of message content
+        let content_hash = self.simple_hash(&message.content);
+        
+        if let Some((count, existing_pubkey)) = self.recent_message_hashes.get_mut(&content_hash) {
+            if existing_pubkey == pubkey {
+                *count += 1;
+                if *count >= self.duplicate_message_threshold {
+                    return true; // Duplicate spam detected
+                }
+            }
+        } else {
+            self.recent_message_hashes.insert(content_hash, (1, pubkey.to_string()));
+        }
+        
+        false
+    }
+    
+    fn simple_hash(&self, content: &str) -> u64 {
+        // Simple hash function for duplicate detection
+        let mut hash = 0u64;
+        for byte in content.bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+        }
+        hash
+    }
+    
+    fn auto_mute_user(&mut self, pubkey: String, _reason: &str) -> bool {
+        if self.auto_muted_users.contains_key(&pubkey) {
+            return false; // Already muted, don't send notification again
+        }
+        
+        let now = Instant::now();
+        self.auto_muted_users.insert(pubkey.clone(), now);
+        
+        // Clean up old frequency data
+        self.user_message_frequency.remove(&pubkey);
+        
+        true // Newly muted
+    }
+    
+    pub fn is_user_auto_muted(&self, pubkey: &str) -> bool {
+        if let Some(mute_time) = self.auto_muted_users.get(pubkey) {
+            Instant::now().duration_since(*mute_time) < Duration::from_secs(600)
+        } else {
+            false
+        }
+    }
+    
+    pub fn manually_unmute_user(&mut self, pubkey: &str) {
+        self.auto_muted_users.remove(pubkey);
+    }
+    
+    pub fn get_auto_muted_users(&self) -> Vec<(String, Duration)> {
+        let now = Instant::now();
+        self.auto_muted_users
+            .iter()
+            .filter_map(|(pubkey, mute_time)| {
+                let elapsed = now.duration_since(*mute_time);
+                if elapsed < Duration::from_secs(600) {
+                    Some((pubkey.clone(), Duration::from_secs(600) - elapsed))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    
+    pub fn cleanup_old_data(&mut self) {
+        let now = Instant::now();
+        
+        // Clean up old frequency tracking (older than 2 minutes)
+        self.user_message_frequency.retain(|_, (_, time)| {
+            now.duration_since(*time) < Duration::from_secs(120)
+        });
+        
+        // Clean up old message hashes (older than 5 minutes)
+        self.recent_message_hashes.clear(); // Simple cleanup for now
+        
+        // Clean up expired auto-mutes
+        self.auto_muted_users.retain(|_, mute_time| {
+            now.duration_since(*mute_time) < Duration::from_secs(600)
+        });
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppState {
@@ -55,6 +287,9 @@ pub struct App {
     
     // Private messaging support
     pub private_chats: HashMap<String, String>, // pubkey -> nickname mapping
+    
+    // Spam filtering
+    spam_filter: SpamFilter,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +343,7 @@ impl App {
             tab_completion_state: None,
             blocked_users: HashSet::new(),
             private_chats: HashMap::new(),
+            spam_filter: SpamFilter::new(),
         };
         
         // Add welcome message to system channel
@@ -142,6 +378,7 @@ impl App {
     pub async fn handle_input(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Key(key) => self.handle_key_event(key).await?,
+            Event::Mouse(mouse) => self.handle_mouse_event(mouse).await?,
             _ => {}
         }
         Ok(())
@@ -212,8 +449,8 @@ impl App {
                         if self.scroll_offset > 0 {
                             self.scroll_offset -= 1;
                         }
-                        // User scrolled up, disable auto-scrolling
-                        self.should_autoscroll = false;
+                        // Check autoscroll status after scrolling
+                        self.update_autoscroll_status();
                     }
                     KeyCode::Down => {
                         self.scroll_offset += 1;
@@ -222,8 +459,8 @@ impl App {
                     }
                     KeyCode::PageUp => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(10);
-                        // User scrolled up, disable auto-scrolling
-                        self.should_autoscroll = false;
+                        // Check autoscroll status after scrolling
+                        self.update_autoscroll_status();
                     }
                     KeyCode::PageDown => {
                         self.scroll_offset += 10;
@@ -334,6 +571,27 @@ impl App {
                     KeyCode::Media(_) => {}
                     KeyCode::Modifier(_) => {}
                 }
+            }
+        }
+        Ok(())
+    }
+    
+    async fn handle_mouse_event(&mut self, mouse: MouseEvent) -> Result<()> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                // Scroll up (towards older messages)
+                if self.scroll_offset > 0 {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3); // Scroll 3 lines at a time
+                }
+                self.update_autoscroll_status();
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll down (towards newer messages)
+                self.scroll_offset += 3; // Scroll 3 lines at a time
+                self.update_autoscroll_status();
+            }
+            _ => {
+                // Ignore other mouse events (clicks, moves, etc.)
             }
         }
         Ok(())
@@ -450,6 +708,34 @@ impl App {
             }
             "version" => {
                 self.show_version().await?;
+            }
+            "spam" => {
+                if parts.len() < 2 {
+                    self.add_message_to_current_channel("Usage: /spam <list|unmute|status>".to_string());
+                } else {
+                    match parts[1] {
+                        "list" => {
+                            self.list_auto_muted_users();
+                        }
+                        "unmute" => {
+                            if parts.len() < 3 {
+                                self.add_message_to_current_channel("Usage: /spam unmute <nickname>".to_string());
+                            } else {
+                                let nickname = parts[2].trim_start_matches('@');
+                                self.unmute_spammer(nickname).await;
+                            }
+                        }
+                        "status" => {
+                            self.show_spam_filter_status();
+                        }
+                        _ => {
+                            self.add_message_to_current_channel("Unknown spam command. Use: list, unmute, or status".to_string());
+                        }
+                    }
+                }
+            }
+            "clear" => {
+                self.clear_current_channel();
             }
             "help" | "h" | "commands" => {
                 self.add_status_message("Help command received!".to_string());
@@ -697,7 +983,9 @@ impl App {
             "/slap <nickname> - Slap someone with a large trout".to_string(),
             "/block [nickname] - Block user or list blocked users".to_string(),
             "/unblock <nickname> - Unblock a user".to_string(),
+            "/spam <list|unmute|status> - Manage spam filter".to_string(),
             "/whois, /w <nickname> - Show user information (npub, channels)".to_string(),
+            "/clear - Clear all messages from current channel".to_string(),
             "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
@@ -781,6 +1069,26 @@ impl App {
                 continue; // Skip blocked messages entirely
             }
             
+            // Filter out spam messages and notify if timestamp manipulation detected
+            if self.spam_filter.is_spam(&message) {
+                // Check if this was timestamp-based spam for notification
+                let current_time = chrono::Utc::now();
+                let is_future_spam = message.timestamp > current_time + chrono::Duration::seconds(300);
+                let is_old_spam = message.timestamp < current_time - chrono::Duration::hours(24);
+                
+                if is_future_spam {
+                    let nickname = message.nickname.clone();
+                    let minutes_future = (message.timestamp - current_time).num_minutes();
+                    self.add_status_message(format!("⚠️ Filtered future-dated message from {} ({}min in future)", nickname, minutes_future));
+                } else if is_old_spam {
+                    let nickname = message.nickname.clone();
+                    let hours_old = (current_time - message.timestamp).num_hours();
+                    self.add_status_message(format!("⚠️ Filtered old message from {} ({}hr old)", nickname, hours_old));
+                }
+                
+                continue; // Skip spam messages
+            }
+            
             // Use sync version for faster processing (no await overhead)
             let _ = self.channel_manager.add_message_sync(message);
             new_messages_count += 1;
@@ -790,12 +1098,20 @@ impl App {
         if new_messages_count > 0 {
             // Check if we should re-enable autoscroll for new messages
             self.update_autoscroll_status_with_height(25); // Use reasonable default height
+            
+            // If we're in autoscroll mode, ensure we scroll to bottom immediately
+            if self.should_autoscroll {
+                self.scroll_to_bottom();
+            }
         }
         
         // Process status updates
         while let Ok(status) = self.status_rx.try_recv() {
             self.add_status_message(status);
         }
+        
+        // Periodically clean up old spam filter data
+        self.spam_filter.cleanup_old_data();
         
         Ok(())
     }
@@ -1123,6 +1439,8 @@ impl App {
             "GM Fiatjaf.",
             "Not your keys, not your identity.",
             "Web3 is a VC backed scam. Nostr is the future.",
+            "Zaps are the signal.",
+            "Be your own algorithm.",
         ];
         
         let random_quote = if quotes.is_empty() {
@@ -1221,17 +1539,22 @@ impl App {
         if let Some(channel) = self.get_current_channel() {
             let message_count = channel.messages.len();
             
-            // If we're at or near bottom, re-enable auto-scrolling
-            let bottom_threshold = if message_count > viewport_height {
-                message_count.saturating_sub(viewport_height)
-            } else {
-                0
-            };
-            
-            // More lenient threshold - if we're within 2 messages of the bottom, enable autoscroll
-            let threshold_margin = 2.min(viewport_height / 4); // At most 25% of viewport or 2 messages
-            if self.scroll_offset >= bottom_threshold.saturating_sub(threshold_margin) {
+            if message_count <= viewport_height {
+                // If all messages fit on screen, always autoscroll
                 self.should_autoscroll = true;
+                return;
+            }
+            
+            // Calculate the position where we show the most recent messages
+            let bottom_scroll_position = message_count.saturating_sub(viewport_height);
+            
+            // Very lenient threshold - if we're within 3 messages of the bottom, enable autoscroll
+            let threshold = 3;
+            if self.scroll_offset >= bottom_scroll_position.saturating_sub(threshold) {
+                self.should_autoscroll = true;
+            } else {
+                // User has scrolled significantly away from bottom, disable autoscroll
+                self.should_autoscroll = false;
             }
         }
     }
@@ -1489,5 +1812,88 @@ impl App {
     /// Update input horizontal scroll to keep cursor visible (fallback with estimate)
     fn update_input_scroll(&mut self) {
         self.update_input_scroll_with_width(80); // Conservative fallback estimate
+    }
+    
+    fn list_auto_muted_users(&mut self) {
+        let auto_muted = self.spam_filter.get_auto_muted_users();
+        
+        if auto_muted.is_empty() {
+            self.add_message_to_current_channel("No users are currently auto-muted for spam".to_string());
+        } else {
+            self.add_message_to_current_channel("Auto-muted spammers:".to_string());
+            for (pubkey, remaining_time) in auto_muted {
+                let nickname = self.find_nickname_for_pubkey(&pubkey)
+                    .unwrap_or_else(|| format!("{}...", &pubkey[..8.min(pubkey.len())]));
+                let minutes = remaining_time.as_secs() / 60;
+                let seconds = remaining_time.as_secs() % 60;
+                self.add_message_to_current_channel(format!("  {} ({}:{:02} remaining)", nickname, minutes, seconds));
+            }
+        }
+    }
+    
+    async fn unmute_spammer(&mut self, nickname: &str) {
+        if let Some(pubkey) = self.find_pubkey_for_nickname(nickname).await {
+            if self.spam_filter.is_user_auto_muted(&pubkey) {
+                self.spam_filter.manually_unmute_user(&pubkey);
+                self.add_message_to_current_channel(format!("Manually unmuted {} from spam filter", nickname));
+            } else {
+                self.add_message_to_current_channel(format!("{} is not currently auto-muted", nickname));
+            }
+        } else {
+            self.add_message_to_current_channel(format!("User '{}' not found", nickname));
+        }
+    }
+    
+    fn show_spam_filter_status(&mut self) {
+        let auto_muted = self.spam_filter.get_auto_muted_users();
+        let muted_count = auto_muted.len();
+        
+        self.add_message_to_current_channel("=== Spam Filter Status ===".to_string());
+        self.add_message_to_current_channel(format!("Currently auto-muted users: {}", muted_count));
+        self.add_message_to_current_channel("Filters enabled:".to_string());
+        self.add_message_to_current_channel("  • Message frequency limit (15/minute)".to_string());
+        self.add_message_to_current_channel("  • Duplicate message detection".to_string());
+        self.add_message_to_current_channel("  • Spam keyword filtering".to_string());
+        self.add_message_to_current_channel("  • Excessive caps detection".to_string());
+        self.add_message_to_current_channel("  • Future timestamp rejection (>5min)".to_string());
+        self.add_message_to_current_channel("  • Old timestamp rejection (>24hr)".to_string());
+        self.add_message_to_current_channel("Auto-mute duration: 10 minutes".to_string());
+        self.add_message_to_current_channel("Use '/spam list' to see muted users".to_string());
+        self.add_message_to_current_channel("Use '/spam unmute <nickname>' to manually unmute".to_string());
+    }
+    
+    fn clear_current_channel(&mut self) {
+        if let Some(channel_name) = &self.current_channel {
+            let was_cleared = self.channel_manager.clear_channel(channel_name);
+            
+            if was_cleared {
+                // Reset scroll position after clearing
+                self.scroll_offset = 0;
+                self.should_autoscroll = true;
+                
+                // Add a confirmation message
+                if channel_name == "system" {
+                    self.add_status_message("🧹 System channel cleared".to_string());
+                } else if channel_name.starts_with("dm:") {
+                    // For private messages, show the nickname instead of the channel ID
+                    let pubkey = &channel_name[3..];
+                    let display_name = self.private_chats.get(pubkey)
+                        .map(|nick| format!("@{}", nick))
+                        .unwrap_or_else(|| format!("dm:{}", &pubkey[..8]));
+                    self.add_status_message(format!("🧹 Private chat with {} cleared", display_name));
+                } else {
+                    self.add_status_message(format!("🧹 Channel #{} cleared", channel_name));
+                }
+            } else {
+                // Channel was already empty or doesn't exist
+                if channel_name == "system" {
+                    self.add_status_message("System channel is already empty".to_string());
+                } else {
+                    self.add_status_message(format!("Channel #{} is already empty", channel_name));
+                }
+            }
+        } else {
+            self.add_status_message("No channel selected to clear".to_string());
+        }
     }
 }

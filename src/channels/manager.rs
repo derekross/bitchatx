@@ -137,4 +137,15 @@ impl ChannelManager {
             vec![]
         }
     }
+    
+    /// Clear all messages from a specific channel
+    pub fn clear_channel(&mut self, geohash: &str) -> bool {
+        if let Some(channel) = self.channels.get_mut(geohash) {
+            let message_count = channel.messages.len();
+            channel.messages.clear();
+            message_count > 0
+        } else {
+            false
+        }
+    }
 }
