@@ -521,9 +521,7 @@ impl App {
         
         // Enable auto-scrolling after sending a message
         self.should_autoscroll = true;
-        if self.should_autoscroll {
-            self.scroll_to_bottom();
-        }
+        self.scroll_to_bottom();
         
         Ok(())
     }
