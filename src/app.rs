@@ -718,10 +718,10 @@ impl App {
             }
             "whois" | "w" => {
                 if parts.len() > 1 {
-                    let nickname = parts[1].trim_start_matches('@');
-                    self.whois_user(nickname).await;
+                    let user_input = parts[1].trim_start_matches('@');
+                    self.whois_user(user_input).await;
                 } else {
-                    self.add_status_message("Usage: /whois <nickname>".to_string());
+                    self.add_status_message("Usage: /whois <nickname> or /whois <nickname#pubkey>".to_string());
                 }
             }
             "version" => {
@@ -1002,7 +1002,7 @@ impl App {
             "/block [nickname] - Block user or list blocked users".to_string(),
             "/unblock <nickname> - Unblock a user".to_string(),
             "/spam <list|unmute|status> - Manage spam filter".to_string(),
-            "/whois, /w <nickname> - Show user information (npub, channels)".to_string(),
+            "/whois, /w <nickname[#pubkey]> - Show user information (npub, channels)".to_string(),
             "/clear - Clear all messages from current channel".to_string(),
             "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
@@ -1772,7 +1772,16 @@ impl App {
         self.cursor_position = self.input.len();
     }
     
-    async fn whois_user(&mut self, nickname: &str) {        
+    async fn whois_user(&mut self, input: &str) {        
+        // Parse input to extract nickname and optional pubkey suffix
+        let (target_nickname, target_pubkey_prefix) = if let Some(hash_pos) = input.rfind('#') {
+            let nickname = &input[..hash_pos];
+            let pubkey_prefix = &input[hash_pos + 1..];
+            (nickname, Some(pubkey_prefix))
+        } else {
+            (input, None)
+        };
+        
         // Search through all channels to find user information
         let mut user_info = None;
         let mut channels_found = Vec::new();
@@ -1788,7 +1797,25 @@ impl App {
                 
                 // Find most recent message from this user
                 for message in channel.messages.iter().rev() {
-                    if message.nickname.eq_ignore_ascii_case(nickname) {
+                    let mut is_match = false;
+                    
+                    // Check if this message matches our search criteria
+                    if let Some(prefix) = target_pubkey_prefix {
+                        // Search by pubkey prefix if provided
+                        if let Some(ref pubkey) = message.pubkey {
+                            if pubkey.starts_with(prefix) && 
+                               message.nickname.eq_ignore_ascii_case(target_nickname) {
+                                is_match = true;
+                            }
+                        }
+                    } else {
+                        // Search by nickname only
+                        if message.nickname.eq_ignore_ascii_case(target_nickname) {
+                            is_match = true;
+                        }
+                    }
+                    
+                    if is_match {
                         if let Some(ref pubkey) = message.pubkey {
                             // Convert pubkey to npub format
                             let npub = match PublicKey::from_hex(pubkey) {
@@ -1814,7 +1841,22 @@ impl App {
         
         // Also search private chats
         for (pubkey, nickname_stored) in &self.private_chats {
-            if nickname_stored.eq_ignore_ascii_case(nickname) {
+            let mut is_match = false;
+            
+            if let Some(prefix) = target_pubkey_prefix {
+                // Search by pubkey prefix if provided
+                if pubkey.starts_with(prefix) && 
+                   nickname_stored.eq_ignore_ascii_case(target_nickname) {
+                    is_match = true;
+                }
+            } else {
+                // Search by nickname only
+                if nickname_stored.eq_ignore_ascii_case(target_nickname) {
+                    is_match = true;
+                }
+            }
+            
+            if is_match {
                 let npub = match PublicKey::from_hex(pubkey) {
                     Ok(pk) => pk.to_bech32().unwrap_or_else(|_| "invalid".to_string()),
                     Err(_) => "invalid".to_string(),
@@ -1836,15 +1878,20 @@ impl App {
         match user_info {
             Some((found_nickname, pubkey, npub)) => {
                 self.add_message_to_current_channel("=== WHOIS Information ===".to_string());
+                
+                // Show display name with pubkey suffix
+                let display_name = self.format_display_nickname(&found_nickname, &Some(pubkey.clone()));
+                self.add_message_to_current_channel(format!("Display Name: {}", display_name));
                 self.add_message_to_current_channel(format!("Nickname: {}", found_nickname));
                 self.add_message_to_current_channel(format!("NPub: {}", npub));
                 
                 let short_pubkey = if pubkey.len() > 16 { 
                     format!("{}...{}", &pubkey[..8], &pubkey[pubkey.len()-8..])
                 } else { 
-                    pubkey 
+                    pubkey.clone()
                 };
                 self.add_message_to_current_channel(format!("PubKey: {}", short_pubkey));
+                self.add_message_to_current_channel(format!("Full PubKey: {}", pubkey));
                 
                 if channels_found.is_empty() {
                     self.add_message_to_current_channel("Channels: No recent activity".to_string());
@@ -1855,7 +1902,12 @@ impl App {
                 self.add_message_to_current_channel("=== End WHOIS ===".to_string());
             }
             None => {
-                self.add_message_to_current_channel(format!("No information found for user '{}'", nickname));
+                let search_target = if target_pubkey_prefix.is_some() {
+                    input.to_string()
+                } else {
+                    target_nickname.to_string()
+                };
+                self.add_message_to_current_channel(format!("No information found for user '{}'", search_target));
                 self.add_message_to_current_channel(format!("Searched {} channels with {} total messages", searched_channels, total_messages));
             }
         }
