@@ -1,4 +1,4 @@
-# BitchatX
+![BitchatX](bitchatx.png)
 
 An IRC-style Nostr client for ephemeral geohash channels, inspired by BitchX and Bitchat.
 

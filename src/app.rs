@@ -1772,15 +1772,20 @@ impl App {
         self.cursor_position = self.input.len();
     }
     
-    async fn whois_user(&mut self, nickname: &str) {
+    async fn whois_user(&mut self, nickname: &str) {        
         // Search through all channels to find user information
         let mut user_info = None;
-        let mut relay_info = Vec::new();
+        let mut channels_found = Vec::new();
+        let mut total_messages = 0;
+        let mut searched_channels = 0;
         
         // Look through all channels for this user
         let all_channels = self.get_all_channels();
         for channel_name in all_channels {
             if let Some(channel) = self.channel_manager.get_channel(&channel_name) {
+                searched_channels += 1;
+                total_messages += channel.messages.len();
+                
                 // Find most recent message from this user
                 for message in channel.messages.iter().rev() {
                     if message.nickname.eq_ignore_ascii_case(nickname) {
@@ -1791,17 +1796,40 @@ impl App {
                                 Err(_) => "invalid".to_string(),
                             };
                             
-                            user_info = Some((message.nickname.clone(), pubkey.clone(), npub));
+                            // Store the most recent user info (only set once)
+                            if user_info.is_none() {
+                                user_info = Some((message.nickname.clone(), pubkey.clone(), npub));
+                            }
                             
-                            // For now, we don't have detailed relay info, so we'll show basic info
-                            // In a full implementation, this would come from the Nostr client
-                            if !relay_info.contains(&channel_name) {
-                                relay_info.push(channel_name.clone());
+                            // Track all channels where user was found
+                            if !channels_found.contains(&channel_name) {
+                                channels_found.push(channel_name.clone());
                             }
                         }
-                        break; // Found user info, stop searching this channel
+                        break; // Found user in this channel, move to next channel
                     }
                 }
+            }
+        }
+        
+        // Also search private chats
+        for (pubkey, nickname_stored) in &self.private_chats {
+            if nickname_stored.eq_ignore_ascii_case(nickname) {
+                let npub = match PublicKey::from_hex(pubkey) {
+                    Ok(pk) => pk.to_bech32().unwrap_or_else(|_| "invalid".to_string()),
+                    Err(_) => "invalid".to_string(),
+                };
+                
+                if user_info.is_none() {
+                    user_info = Some((nickname_stored.clone(), pubkey.clone(), npub));
+                }
+                
+                // Check if we have a private chat channel for this user
+                let private_channel = format!("@{}", nickname_stored);
+                if self.channel_manager.get_channel(&private_channel).is_some() {
+                    channels_found.push("private chat".to_string());
+                }
+                break;
             }
         }
         
@@ -1818,16 +1846,17 @@ impl App {
                 };
                 self.add_message_to_current_channel(format!("PubKey: {}", short_pubkey));
                 
-                if relay_info.is_empty() {
-                    self.add_message_to_current_channel("Relays: No recent activity".to_string());
+                if channels_found.is_empty() {
+                    self.add_message_to_current_channel("Channels: No recent activity".to_string());
                 } else {
-                    let channels_str = relay_info.join(", #");
-                    self.add_message_to_current_channel(format!("Channels: #{}", channels_str));
+                    let channels_str = channels_found.join(", ");
+                    self.add_message_to_current_channel(format!("Seen in: {}", channels_str));
                 }
                 self.add_message_to_current_channel("=== End WHOIS ===".to_string());
             }
             None => {
                 self.add_message_to_current_channel(format!("No information found for user '{}'", nickname));
+                self.add_message_to_current_channel(format!("Searched {} channels with {} total messages", searched_channels, total_messages));
             }
         }
     }
