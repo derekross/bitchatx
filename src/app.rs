@@ -239,6 +239,15 @@ impl SpamFilter {
             now.duration_since(*mute_time) < Duration::from_secs(600)
         });
     }
+    
+    pub fn is_enabled(&self) -> bool {
+        // Spam filter is always enabled in this implementation
+        true
+    }
+    
+    pub fn get_auto_muted_count(&self) -> usize {
+        self.auto_muted_users.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -727,6 +736,9 @@ impl App {
             "version" => {
                 self.show_version().await?;
             }
+            "status" => {
+                self.show_status().await;
+            }
             "spam" => {
                 if parts.len() < 2 {
                     self.add_message_to_current_channel("Usage: /spam <list|unmute|status>".to_string());
@@ -1004,6 +1016,7 @@ impl App {
             "/spam <list|unmute|status> - Manage spam filter".to_string(),
             "/whois, /w <nickname[#pubkey]> - Show user information (npub, channels)".to_string(),
             "/clear - Clear all messages from current channel".to_string(),
+            "/status - Show connection status and relay information".to_string(),
             "/version - Show application version and fun quote".to_string(),
             "/help, /h, /commands - Show this help".to_string(),
             "/quit, /q, /exit - Exit BitchatX".to_string(),
@@ -1493,6 +1506,51 @@ impl App {
         }
         
         Ok(())
+    }
+    
+    async fn show_status(&mut self) {
+        // Get relay connection information
+        let relay_count = self.nostr_client.get_relay_count();
+        let (default_relays, georelays) = self.nostr_client.get_relay_stats();
+        
+        // Build status message
+        let mut status_lines = Vec::new();
+        status_lines.push("=== BitchatX Status ===".to_string());
+        status_lines.push(format!("Connected Relays: {}", relay_count));
+        status_lines.push(format!("  Default Relays: {}", default_relays));
+        status_lines.push(format!("  GeoRelays: {}", georelays));
+        
+        // Show current channel info
+        if let Some(current) = &self.current_channel {
+            status_lines.push(format!("Current Channel: {}", current));
+        }
+        
+        // Show identity info
+        let npub = match PublicKey::from_hex(&self.identity.pubkey) {
+            Ok(pk) => pk.to_bech32().unwrap_or_else(|_| self.identity.pubkey.clone()),
+            Err(_) => self.identity.pubkey.clone(),
+        };
+        status_lines.push(format!("Your NPub: {}", npub));
+        status_lines.push(format!("Nickname: {}", self.identity.nickname));
+        
+        // Show some stats
+        let joined_channels = self.channel_manager.list_channels();
+        status_lines.push(format!("Joined Channels: {}", joined_channels.len()));
+        
+        // Show spam filter status if enabled
+        if self.spam_filter.is_enabled() {
+            let muted_count = self.spam_filter.get_auto_muted_count();
+            status_lines.push(format!("Spam Filter: Enabled ({} muted users)", muted_count));
+        } else {
+            status_lines.push("Spam Filter: Disabled".to_string());
+        }
+        
+        status_lines.push("=== End Status ===".to_string());
+        
+        // Output each line to current channel
+        for line in status_lines {
+            self.add_message_to_current_channel(line);
+        }
     }
     
     fn is_slash_command_context(&self, word_start_pos: usize) -> bool {
