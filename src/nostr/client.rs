@@ -1,11 +1,11 @@
 use anyhow::Result;
 use nostr_sdk::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use super::Identity;
+use super::{Identity, GeoRelayDirectory};
 use crate::channels::Message;
 
 // Default Nostr relays for BitchatX (synchronized with bitchat-android)
@@ -24,6 +24,8 @@ pub struct NostrClient {
     subscriptions: HashMap<String, SubscriptionId>,
     message_tx: mpsc::UnboundedSender<Message>,
     status_tx: mpsc::UnboundedSender<String>,
+    geo_relay_directory: GeoRelayDirectory,
+    connected_relays: HashSet<String>,
 }
 
 impl NostrClient {
@@ -34,9 +36,16 @@ impl NostrClient {
     ) -> Result<Self> {
         let client = Client::new(&identity.keys);
         
-        // Add relays
+        // Initialize georelay directory
+        let geo_relay_directory = GeoRelayDirectory::new()?;
+        geo_relay_directory.initialize().await?;
+        
+        // Add default relays for initial connection
+        // These will be supplemented with geohash-specific relays when joining channels
+        let mut connected_relays = HashSet::new();
         for &relay_url in DEFAULT_RELAYS {
             client.add_relay(relay_url).await?;
+            connected_relays.insert(relay_url.to_string());
         }
         
         Ok(Self {
@@ -45,6 +54,8 @@ impl NostrClient {
             subscriptions: HashMap::new(),
             message_tx,
             status_tx,
+            geo_relay_directory,
+            connected_relays,
         })
     }
     
@@ -162,6 +173,9 @@ impl NostrClient {
     }
     
     pub async fn subscribe_to_channel(&mut self, geohash: &str) -> Result<()> {
+        // Connect to geohash-specific relays
+        self.ensure_georelays_connected(geohash).await?;
+        
         // Create subscription filter for ephemeral events in this geohash
         let filter = Filter::new()
             .kind(Kind::Ephemeral(20000))
@@ -211,8 +225,51 @@ impl NostrClient {
         Ok(())
     }
     
+    /// Ensure that georelays are connected for a specific geohash
+    async fn ensure_georelays_connected(&mut self, geohash: &str) -> Result<()> {
+        // Get closest relays for this geohash
+        let georelay_urls = self.geo_relay_directory.closest_relays_for_geohash(geohash, Some(5)).await;
+        
+        // Add geohash-specific relays to client
+        for relay_url in &georelay_urls {
+            // Only add if not already connected
+            if !self.connected_relays.contains(relay_url) {
+                match self.client.add_relay(relay_url.clone()).await {
+                    Ok(_) => {
+                        self.connected_relays.insert(relay_url.clone());
+                        let total_relays = self.connected_relays.len();
+                        let _ = self.status_tx.send(format!("Connected to georelay: {} (total: {})", relay_url, total_relays));
+                    }
+                    Err(e) => {
+                        let _ = self.status_tx.send(format!("Failed to add georelay {}: {}", relay_url, e));
+                    }
+                }
+            }
+        }
+        
+        // Connect to any new relays
+        if !georelay_urls.is_empty() {
+            let _ = self.client.connect().await;
+        }
+        
+        Ok(())
+    }
+    
     pub fn get_relay_count(&self) -> usize {
-        // Return the number of configured relays (matches bitchat-android default count)
-        DEFAULT_RELAYS.len()
+        // Return the actual number of connected relays (defaults + georelays)
+        self.connected_relays.len()
+    }
+    
+    /// Get the current relay count including georelays
+    pub async fn get_total_relay_count(&self) -> usize {
+        self.geo_relay_directory.relay_count().await + DEFAULT_RELAYS.len()
+    }
+    
+    /// Get relay connection statistics
+    pub fn get_relay_stats(&self) -> (usize, usize) {
+        let total_connected = self.connected_relays.len();
+        let default_count = DEFAULT_RELAYS.len();
+        let georelay_count = total_connected.saturating_sub(default_count);
+        (default_count, georelay_count)
     }
 }

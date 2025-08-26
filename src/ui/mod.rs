@@ -11,6 +11,9 @@ use crate::app::{App, AppState, InputMode};
 pub fn draw(f: &mut Frame<'_>, app: &mut App) {
     let size = f.size();
     
+    // Clear clickable regions for this frame
+    app.clickable_regions.clear();
+    
     // Create main layout
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -120,8 +123,30 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(format!("<{}> ", display_nickname), Style::default().fg(nick_color)),
             ];
             
-            // Parse markdown formatting and add styled spans
-            message_spans.extend(parse_markdown(&content));
+            // Parse markdown formatting and track nostr URIs
+            let (content_spans, nostr_uris) = parse_markdown_with_tracking(&content);
+            message_spans.extend(content_spans);
+            
+            // Track clickable regions for nostr URIs in this message
+            let base_y = inner.y + lines.len() as u16;
+            let prefix_text = format!("[{}] <{}> ", timestamp, display_nickname);
+            let available_width = inner.width as usize;
+            
+            // Calculate the actual rendered position of each nostr URI accounting for wrapping
+            for nostr_uri in nostr_uris {
+                let regions = calculate_wrapped_regions(
+                    &prefix_text,
+                    &content,
+                    &nostr_uri,
+                    available_width,
+                    inner.x,
+                    base_y,
+                );
+                
+                for region in regions {
+                    app.clickable_regions.push(region);
+                }
+            }
             
             let line = Line::from(message_spans);
             lines.push(line);
@@ -361,77 +386,85 @@ fn draw_input_area(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// Parse markdown formatting in text and return styled spans
-/// Supports **bold** and *italic* formatting
-fn parse_markdown(text: &str) -> Vec<Span<'static>> {
+
+/// Parse markdown formatting and track nostr URIs, returning both spans and found URIs
+fn parse_markdown_with_tracking(text: &str) -> (Vec<Span<'static>>, Vec<String>) {
     let mut spans = Vec::new();
-    let mut chars = text.char_indices().peekable();
     let mut current_text = String::new();
+    let mut nostr_uris = Vec::new();
+    let mut i = 0;
+    let chars: Vec<char> = text.chars().collect();
     
-    while let Some((i, ch)) = chars.next() {
-        if ch == '*' {
-            // Check for bold (**text**)
-            if let Some(&(_, '*')) = chars.peek() {
-                // Found **, look for closing **
-                chars.next(); // consume the second *
-                
-                // Add any accumulated text as normal span
+    while i < chars.len() {
+        if chars[i] == '*' {
+            // Handle markdown formatting
+            if i + 1 < chars.len() && chars[i + 1] == '*' {
+                // Handle **bold**
                 if !current_text.is_empty() {
                     spans.push(Span::raw(current_text.clone()));
                     current_text.clear();
                 }
                 
-                // Find closing **
-                let remaining_text = &text[i + 2..];
-                if let Some(end_pos) = find_closing_bold(remaining_text) {
-                    let bold_text = &remaining_text[..end_pos];
+                if let Some(end_pos) = find_closing_bold(&chars[i + 2..]) {
+                    let bold_text: String = chars[i + 2..i + 2 + end_pos].iter().collect();
                     spans.push(Span::styled(
-                        bold_text.to_string(),
+                        bold_text,
                         Style::default().add_modifier(Modifier::BOLD)
                     ));
-                    
-                    // Skip ahead past the closing **
-                    let skip_chars = bold_text.len() + 2; // +2 for the closing **
-                    for _ in 0..skip_chars {
-                        if chars.next().is_none() {
-                            break;
-                        }
-                    }
+                    i += 4 + end_pos; // Skip past **text**
                 } else {
-                    // No closing **, treat as literal
                     current_text.push_str("**");
+                    i += 2;
                 }
             } else {
-                // Check for italic (*text*)
-                // Add any accumulated text as normal span
+                // Handle *italic*
                 if !current_text.is_empty() {
                     spans.push(Span::raw(current_text.clone()));
                     current_text.clear();
                 }
                 
-                // Find closing *
-                let remaining_text = &text[i + 1..];
-                if let Some(end_pos) = find_closing_italic(remaining_text) {
-                    let italic_text = &remaining_text[..end_pos];
+                if let Some(end_pos) = find_closing_italic(&chars[i + 1..]) {
+                    let italic_text: String = chars[i + 1..i + 1 + end_pos].iter().collect();
                     spans.push(Span::styled(
-                        italic_text.to_string(),
+                        italic_text,
                         Style::default().add_modifier(Modifier::ITALIC)
                     ));
-                    
-                    // Skip ahead past the closing *
-                    let skip_chars = italic_text.len() + 1; // +1 for the closing *
-                    for _ in 0..skip_chars {
-                        if chars.next().is_none() {
-                            break;
-                        }
-                    }
+                    i += 2 + end_pos; // Skip past *text*
                 } else {
-                    // No closing *, treat as literal
                     current_text.push('*');
+                    i += 1;
                 }
             }
+        } else if i + 6 <= chars.len() && chars[i..i + 6].iter().collect::<String>() == "nostr:" {
+            // Handle nostr: URIs
+            if !current_text.is_empty() {
+                spans.push(Span::raw(current_text.clone()));
+                current_text.clear();
+            }
+            
+            // Find the end of the nostr URI (space or end of string)
+            let mut uri_end = i + 6;
+            while uri_end < chars.len() && !chars[uri_end].is_whitespace() {
+                uri_end += 1;
+            }
+            
+            let nostr_uri: String = chars[i..uri_end].iter().collect();
+            
+            // Store this nostr URI for tracking
+            nostr_uris.push(nostr_uri.clone());
+            
+            // Create a clickable link span with cyan color and underline
+            spans.push(Span::styled(
+                nostr_uri,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::UNDERLINED)
+            ));
+            
+            i = uri_end;
         } else {
-            current_text.push(ch);
+            current_text.push(chars[i]);
+            i += 1;
         }
     }
     
@@ -445,26 +478,103 @@ fn parse_markdown(text: &str) -> Vec<Span<'static>> {
         spans.push(Span::raw(text.to_string()));
     }
     
-    spans
+    (spans, nostr_uris)
 }
 
 /// Find the position of closing ** for bold text
-fn find_closing_bold(text: &str) -> Option<usize> {
-    let mut chars = text.char_indices().peekable();
-    
-    while let Some((i, ch)) = chars.next() {
-        if ch == '*' {
-            if let Some(&(_, '*')) = chars.peek() {
-                return Some(i);
-            }
+fn find_closing_bold(chars: &[char]) -> Option<usize> {
+    let mut i = 0;
+    while i + 1 < chars.len() {
+        if chars[i] == '*' && chars[i + 1] == '*' {
+            return Some(i);
         }
+        i += 1;
     }
     None
 }
 
 /// Find the position of closing * for italic text  
-fn find_closing_italic(text: &str) -> Option<usize> {
-    text.char_indices()
-        .find(|(_, ch)| *ch == '*')
-        .map(|(i, _)| i)
+fn find_closing_italic(chars: &[char]) -> Option<usize> {
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '*' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Calculate clickable regions for a nostr URI that may wrap across multiple lines
+/// This simulates ratatui's text wrapping behavior more accurately
+fn calculate_wrapped_regions(
+    prefix: &str,
+    content: &str,
+    nostr_uri: &str,
+    available_width: usize,
+    base_x: u16,
+    base_y: u16,
+) -> Vec<crate::app::ClickableRegion> {
+    let mut regions = Vec::new();
+    
+    // Find where the nostr URI starts in the content
+    let uri_start = match content.find(nostr_uri) {
+        Some(start) => start,
+        None => return regions,
+    };
+    
+    // Create the full text that would be rendered (prefix + content)
+    let full_text = format!("{}{}", prefix, content);
+    let uri_start_in_full = prefix.len() + uri_start;
+    let uri_end_in_full = uri_start_in_full + nostr_uri.len();
+    
+    // Simulate ratatui's text wrapping behavior
+    let mut current_line = 0u16;
+    let mut current_pos = 0usize;
+    let chars: Vec<char> = full_text.chars().collect();
+    
+    while current_pos < chars.len() && current_line < 100 {
+        // Determine how many characters fit on this line
+        let chars_that_fit = if current_pos + available_width > chars.len() {
+            chars.len() - current_pos
+        } else {
+            available_width
+        };
+        
+        let line_end = current_pos + chars_that_fit;
+        
+        // Check if any part of the URI is on this line
+        if current_pos < uri_end_in_full && uri_start_in_full < line_end {
+            // Calculate the intersection of this line with the URI
+            let uri_start_on_line = uri_start_in_full.max(current_pos);
+            let uri_end_on_line = uri_end_in_full.min(line_end);
+            
+            if uri_start_on_line < uri_end_on_line {
+                let x_offset = uri_start_on_line - current_pos;
+                let width = uri_end_on_line - uri_start_on_line;
+                
+                // Only create a region if the width is reasonable (not extending beyond line)
+                let max_width_on_line = available_width.saturating_sub(x_offset);
+                let actual_width = width.min(max_width_on_line);
+                
+                if actual_width > 0 {
+                    regions.push(crate::app::ClickableRegion {
+                        x: base_x + x_offset as u16,
+                        y: base_y + current_line,
+                        width: actual_width as u16,
+                        nostr_uri: nostr_uri.to_string(),
+                    });
+                }
+            }
+        }
+        
+        // Move to next line - ratatui will break at character boundaries for long words
+        current_pos = line_end;
+        current_line += 1;
+        
+        // Break if we've processed all characters
+        if current_pos >= chars.len() {
+            break;
+        }
+    }
+    
+    regions
 }

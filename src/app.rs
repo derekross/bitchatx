@@ -290,6 +290,17 @@ pub struct App {
     
     // Spam filtering
     spam_filter: SpamFilter,
+    
+    // Clickable regions for nostr URIs
+    pub clickable_regions: Vec<ClickableRegion>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClickableRegion {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub nostr_uri: String,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +355,7 @@ impl App {
             blocked_users: HashSet::new(),
             private_chats: HashMap::new(),
             spam_filter: SpamFilter::new(),
+            clickable_regions: Vec::new(),
         };
         
         // Add welcome message to system channel
@@ -590,8 +602,14 @@ impl App {
                 self.scroll_offset += 3; // Scroll 3 lines at a time
                 self.update_autoscroll_status();
             }
+            MouseEventKind::Down(button) => {
+                // Handle mouse clicks
+                if matches!(button, crossterm::event::MouseButton::Left) {
+                    self.handle_mouse_click(mouse.column, mouse.row).await;
+                }
+            }
             _ => {
-                // Ignore other mouse events (clicks, moves, etc.)
+                // Ignore other mouse events (moves, etc.)
             }
         }
         Ok(())
@@ -998,6 +1016,7 @@ impl App {
             "Channel switching: Esc then Tab to cycle through channels".to_string(),
             "Page Up/Down - Fast scroll, Home/End - Cursor start/end".to_string(),
             "Clipboard: Ctrl+C - Copy, Ctrl+V - Paste, Ctrl+X - Cut, Ctrl+A - Select All".to_string(),
+            "Mouse: Click on nostr: URI links to open in browser (via njump.me)".to_string(),
         ];
         
         for line in help_text {
@@ -1931,6 +1950,35 @@ impl App {
             }
         } else {
             self.add_status_message("No channel selected to clear".to_string());
+        }
+    }
+    
+    /// Handle mouse clicks and check for nostr URIs at precise coordinates
+    async fn handle_mouse_click(&mut self, column: u16, row: u16) {
+        // Check if click is on any of the tracked clickable regions
+        for region in &self.clickable_regions {
+            if row == region.y && column >= region.x && column < region.x + region.width {
+                // Click is within this nostr URI region
+                let nostr_uri = region.nostr_uri.clone();
+                self.open_nostr_uri(&nostr_uri).await;
+                return;
+            }
+        }
+    }
+    
+    
+    /// Open a nostr URI in the browser via njump.me
+    async fn open_nostr_uri(&mut self, nostr_uri: &str) {
+        // Convert nostr: URI to njump.me URL
+        let njump_url = format!("https://njump.me/{}", &nostr_uri[6..]); // Remove "nostr:" prefix
+        
+        match open::that(&njump_url) {
+            Ok(_) => {
+                self.add_status_message(format!("🔗 Opened {} in browser", nostr_uri));
+            }
+            Err(e) => {
+                self.add_status_message(format!("❌ Failed to open browser: {}", e));
+            }
         }
     }
 }

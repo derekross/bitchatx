@@ -59,10 +59,10 @@ fn show_startup_logo() {
     let version = env!("CARGO_PKG_VERSION");
     println!("\n\x1B[38;5;129m=== BitchatX v{} - IRC-style Nostr Client ===\x1B[0m", version);
     println!("\x1B[38;5;165mInspired by BitchX + Bitchat - Ephemeral Geohash Channels\x1B[0m");
-    println!("\x1B[38;5;201mPress any key to continue...\x1B[0m\n");
+    println!("\x1B[38;5;201mLoading...\x1B[0m\n");
     
-    // Wait for keypress
-    let _ = std::io::Read::read(&mut std::io::stdin(), &mut [0u8; 1]);
+    // Wait for 2 seconds
+    std::thread::sleep(std::time::Duration::from_secs(2));
 }
 
 #[tokio::main]
