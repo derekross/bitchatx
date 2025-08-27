@@ -268,9 +268,6 @@ impl NostrClient {
     }
     
     /// Get the current relay count including georelays
-    pub async fn get_total_relay_count(&self) -> usize {
-        self.geo_relay_directory.relay_count().await + DEFAULT_RELAYS.len()
-    }
     
     /// Get relay connection statistics
     pub fn get_relay_stats(&self) -> (usize, usize) {

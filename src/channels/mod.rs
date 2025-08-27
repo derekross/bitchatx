@@ -99,9 +99,6 @@ impl Channel {
         self.participants.retain(|_, p| p.last_seen > cutoff);
     }
     
-    pub fn get_message_count(&self) -> usize {
-        self.messages.len()
-    }
     
     pub fn get_participant_count(&self) -> usize {
         self.participants.len()

@@ -97,10 +97,6 @@ impl Identity {
         Err(anyhow!("No profile name found"))
     }
     
-    /// Get the public key as a PublicKey
-    pub fn public_key(&self) -> PublicKey {
-        self.keys.public_key()
-    }
     
     /// Sign an event
     pub fn sign_event(&self, event_builder: EventBuilder) -> Result<Event> {

@@ -212,10 +212,6 @@ impl GeoRelayDirectory {
         ]
     }
     
-    /// Get relay count for statistics
-    pub async fn relay_count(&self) -> usize {
-        self.relays.read().await.len()
-    }
 }
 
 /// Calculate haversine distance between two points in kilometers

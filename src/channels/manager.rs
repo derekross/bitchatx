@@ -35,20 +35,6 @@ impl ChannelManager {
         Ok(())
     }
     
-    pub async fn add_message(&mut self, message: Message) {
-        let channel_name = message.channel.clone();
-        
-        // Create channel if it doesn't exist
-        if !self.channels.contains_key(&channel_name) {
-            let channel = Channel::new(&channel_name);
-            self.channels.insert(channel_name.clone(), channel);
-        }
-        
-        // Add message to channel
-        if let Some(channel) = self.channels.get_mut(&channel_name) {
-            channel.add_message(message);
-        }
-    }
     
     pub fn add_message_sync(&mut self, message: Message) {
         let channel_name = message.channel.clone();
@@ -69,9 +55,6 @@ impl ChannelManager {
         self.channels.get(geohash)
     }
     
-    pub fn get_channel_mut(&mut self, geohash: &str) -> Option<&mut Channel> {
-        self.channels.get_mut(geohash)
-    }
     
     pub fn list_channels(&self) -> Vec<String> {
         // Only return actually joined channels
@@ -102,11 +85,6 @@ impl ChannelManager {
         channels
     }
     
-    pub fn get_message_count(&self, geohash: &str) -> usize {
-        self.channels.get(geohash)
-            .map(|c| c.get_message_count())
-            .unwrap_or(0)
-    }
     
     pub fn get_active_user_count(&self, geohash: &str) -> usize {
         self.channels.get(geohash)
@@ -114,29 +92,6 @@ impl ChannelManager {
             .unwrap_or(0)
     }
     
-    pub fn get_active_channel_count(&self) -> usize {
-        self.channels.len()
-    }
-    
-    pub fn get_recent_messages(&self, geohash: &str, limit: usize) -> Vec<&Message> {
-        if let Some(channel) = self.channels.get(geohash) {
-            let start = channel.messages.len().saturating_sub(limit);
-            channel.messages[start..].iter().collect()
-        } else {
-            vec![]
-        }
-    }
-    
-    pub fn search_messages(&self, geohash: &str, query: &str) -> Vec<&Message> {
-        if let Some(channel) = self.channels.get(geohash) {
-            channel.messages
-                .iter()
-                .filter(|msg| msg.content.to_lowercase().contains(&query.to_lowercase()))
-                .collect()
-        } else {
-            vec![]
-        }
-    }
     
     /// Clear all messages from a specific channel
     pub fn clear_channel(&mut self, geohash: &str) -> bool {
