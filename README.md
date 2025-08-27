@@ -89,6 +89,23 @@ BitchatX supports two identity modes:
 
 **Note**: The `/nick` command only changes your display name locally within the current session and does not update your Nostr profile.
 
+## Building
+
+### Download Pre-built Binaries
+Download the latest release for your platform from the [Releases page](../../releases).
+
+### Build from Source
+```bash
+# Quick build for current platform
+cargo build --release
+
+# Or use the build script (includes Windows cross-compilation)
+chmod +x build.sh
+./build.sh
+```
+
+For detailed build instructions including cross-platform builds, see [BUILD.md](BUILD.md).
+
 ## Architecture
 
 BitchatX is built with:

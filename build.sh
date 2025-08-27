@@ -9,29 +9,25 @@ echo "🚀 Building BitchatX..."
 echo "Building for current platform..."
 cargo build --release
 
-# Check if cross is installed for cross-compilation
-if command -v cross &> /dev/null; then
-    echo "📦 Cross-compilation available, building for multiple targets..."
-    
-    # Add common targets
-    echo "Building for Linux (x86_64)..."
-    cross build --release --target x86_64-unknown-linux-gnu
-    
-    echo "Building for Windows (x86_64)..."
-    cross build --release --target x86_64-pc-windows-gnu
-    
-    echo "Building for macOS (x86_64)..."
-    cross build --release --target x86_64-apple-darwin
-    
-    echo "Building for macOS (ARM64)..."
-    cross build --release --target aarch64-apple-darwin
-    
-    echo "✅ Cross-compilation complete!"
-    echo "📁 Binaries available in target/<platform>/release/"
+# Try cross-compilation for supported targets
+echo "📦 Attempting cross-compilation..."
+
+# Install Windows target
+rustup target add x86_64-pc-windows-gnu 2>/dev/null || true
+
+echo "Building for Windows (x86_64)..."
+if cargo build --release --target x86_64-pc-windows-gnu 2>/dev/null; then
+    echo "✅ Windows build successful"
 else
-    echo "⚠️  Cross-compilation not available. Install with: cargo install cross"
-    echo "📁 Native binary available in target/release/bitchatx"
+    echo "⚠️  Windows build failed - install mingw-w64:"
+    echo "    sudo apt install gcc-mingw-w64-x86-64"
 fi
+
+echo ""
+echo "ℹ️  macOS builds skipped (require macOS SDK on Apple hardware)"
+echo "   For macOS binaries, build on a Mac with: cargo build --release"
+
+echo "📁 Available binaries in target/*/release/"
 
 echo ""
 echo "🎉 BitchatX build complete!"
