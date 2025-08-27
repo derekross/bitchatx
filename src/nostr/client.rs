@@ -180,27 +180,12 @@ impl NostrClient {
             .custom_tag(SingleLetterTag::lowercase(Alphabet::G), vec![geohash.to_string()])
             .limit(1000); // Remove time filter to get messages immediately
         
-        // Subscribe immediately to default relays first
-        let subscription_id = self.client.subscribe(vec![filter.clone()], None).await;
+        // Connect to geohash-specific relays first to get best coverage
+        self.ensure_georelays_connected(geohash).await?;
+        
+        // Then subscribe to all connected relays (including new georelays)
+        let subscription_id = self.client.subscribe(vec![filter], None).await;
         self.subscriptions.insert(geohash.to_string(), subscription_id);
-        
-        // Connect to geohash-specific relays in background (don't block)
-        let client = self.client.clone();
-        let geohash_owned = geohash.to_string();
-        let connected_relays = self.connected_relays.clone();
-        let geo_relay_directory = self.geo_relay_directory.clone();
-        let status_tx = self.status_tx.clone();
-        
-        tokio::spawn(async move {
-            let georelay_urls = geo_relay_directory.closest_relays_for_geohash(&geohash_owned, Some(5)).await;
-            for relay_url in &georelay_urls {
-                if !connected_relays.contains(relay_url) {
-                    if let Ok(_) = client.add_relay(relay_url.clone()).await {
-                        let _ = status_tx.send(format!("Added georelay: {}", relay_url));
-                    }
-                }
-            }
-        });
         
         Ok(())
     }
