@@ -136,7 +136,7 @@ async fn main() -> Result<()> {
 
 async fn run_app(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App) -> Result<()> {
     let mut last_tick = Instant::now();
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(100); // Increased frequency from 250ms to 100ms for more responsive message processing
 
     loop {
         terminal.draw(|f| {

@@ -854,7 +854,7 @@ impl App {
         // Create a future for the network send
         // Network send will happen after scroll_to_bottom()
         
-        // Send to network after UI operations are complete
+        // Send to network (now non-blocking via NostrClient modification)
         let _ = self.nostr_client.send_message(channel, content, &self.identity.nickname).await;
         
         // Enable auto-scrolling before network operations
@@ -1463,11 +1463,11 @@ impl App {
                 // For system channel, just show locally without sending to network
                 self.channel_manager.add_message_sync(message);
             } else {
-                // Send to Nostr for other channels
-                self.nostr_client.send_message(channel, action, &self.identity.nickname).await?;
-                
-                // Add local echo
+                // Add local echo first for instant feedback
                 self.channel_manager.add_message_sync(message);
+                
+                // Send to Nostr for other channels (now non-blocking)
+                let _ = self.nostr_client.send_message(channel, action, &self.identity.nickname).await;
             }
         } else {
             self.add_status_message("No channel selected".to_string());
@@ -1994,12 +1994,12 @@ impl App {
         }
     }
     
-    /// Format a nickname with pubkey suffix if available (e.g., "alice#02c1")
+    /// Format a nickname with pubkey suffix if available (e.g., "alice#7b9f")
     pub fn format_display_nickname(&self, nickname: &str, pubkey: &Option<String>) -> String {
         match pubkey {
             Some(pk) if pk.len() >= 4 => {
-                // Take first 4 characters of pubkey as suffix
-                let suffix = &pk[..4];
+                // Take last 4 characters of pubkey as suffix for better uniqueness
+                let suffix = &pk[pk.len()-4..];
                 format!("{}#{}", nickname, suffix)
             }
             _ => nickname.to_string(),

@@ -88,6 +88,7 @@ impl NostrClient {
         
         tokio::spawn(async move {
             while let Ok(notification) = notifications.recv().await {
+                // Process notifications immediately without any buffering
                 match notification {
                     RelayPoolNotification::Event { event, .. } => {
                         if let Err(e) = Self::handle_event(*event, &message_tx, &status_tx, &our_pubkey).await {
@@ -173,18 +174,34 @@ impl NostrClient {
     }
     
     pub async fn subscribe_to_channel(&mut self, geohash: &str) -> Result<()> {
-        // Connect to geohash-specific relays
-        self.ensure_georelays_connected(geohash).await?;
-        
-        // Create subscription filter for ephemeral events in this geohash
+        // Create subscription filter first (for immediate subscription to default relays)
         let filter = Filter::new()
             .kind(Kind::Ephemeral(20000))
             .custom_tag(SingleLetterTag::lowercase(Alphabet::G), vec![geohash.to_string()])
-            .limit(1000)  // Increased limit
-            .since(Timestamp::now() - Duration::from_secs(86400)); // Last 24 hours instead of 1 hour
+            .limit(1000); // Remove time filter to get messages immediately
         
-        let subscription_id = self.client.subscribe(vec![filter], None).await;
+        // Subscribe immediately to default relays first
+        let subscription_id = self.client.subscribe(vec![filter.clone()], None).await;
         self.subscriptions.insert(geohash.to_string(), subscription_id);
+        
+        // Connect to geohash-specific relays in background (don't block)
+        let client = self.client.clone();
+        let geohash_owned = geohash.to_string();
+        let connected_relays = self.connected_relays.clone();
+        let geo_relay_directory = self.geo_relay_directory.clone();
+        let status_tx = self.status_tx.clone();
+        
+        tokio::spawn(async move {
+            let georelay_urls = geo_relay_directory.closest_relays_for_geohash(&geohash_owned, Some(5)).await;
+            for relay_url in &georelay_urls {
+                if !connected_relays.contains(relay_url) {
+                    if let Ok(_) = client.add_relay(relay_url.clone()).await {
+                        let _ = status_tx.send(format!("Added georelay: {}", relay_url));
+                    }
+                }
+            }
+        });
+        
         Ok(())
     }
     
@@ -212,15 +229,20 @@ impl NostrClient {
         
         let event = self.identity.sign_event(event_builder)?;
         
-        // Send to all connected relays with timeout
-        match timeout(Duration::from_secs(5), self.client.send_event(event)).await {
-            Ok(_event_id) => {
-                // Don't spam with "Message sent" notifications
+        // Send to all connected relays in background (fire-and-forget)
+        let client = self.client.clone();
+        let status_tx = self.status_tx.clone();
+        let channel = channel.to_string();
+        tokio::spawn(async move {
+            match timeout(Duration::from_secs(5), client.send_event(event)).await {
+                Ok(_event_id) => {
+                    // Don't spam with "Message sent" notifications
+                }
+                Err(_) => {
+                    let _ = status_tx.send(format!("Message send timeout to #{}", channel));
+                }
             }
-            Err(_) => {
-                let _ = self.status_tx.send(format!("Message send timeout to #{}", channel));
-            }
-        }
+        });
         
         Ok(())
     }
