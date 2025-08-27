@@ -59,8 +59,7 @@ jobs:
     - name: Build binary
       run: cargo build --release --target ${{ matrix.target }}
 
-    - name: Package binary (Unix)
-      if: matrix.os != 'windows-latest'
+    - name: Package binary
       run: |
         cd target/${{ matrix.target }}/release
         if [ "${{ matrix.target }}" = "x86_64-pc-windows-gnu" ]; then
@@ -69,20 +68,11 @@ jobs:
           tar czf ../../../bitchatx-${{ matrix.name }}.tar.gz bitchatx
         fi
 
-    - name: Package binary (Windows)
-      if: matrix.os == 'windows-latest'
-      run: |
-        cd target/${{ matrix.target }}/release
-        7z a ../../../bitchatx-${{ matrix.name }}.zip bitchatx.exe
-
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: bitchatx-${{ matrix.name }}
-        path: |
-          bitchatx-${{ matrix.name }}.tar.gz
-          bitchatx-${{ matrix.name }}.zip
-        if-no-files-found: ignore
+        path: bitchatx-${{ matrix.name }}.tar.gz
 
   # Create release on tags
   release:
@@ -90,6 +80,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     
     steps:
     - name: Download all artifacts
@@ -100,7 +92,6 @@ jobs:
       with:
         files: |
           bitchatx-*/bitchatx-*.tar.gz
-          bitchatx-*/bitchatx-*.zip
         generate_release_notes: true
         draft: false
         prerelease: false
