@@ -97,17 +97,30 @@ fn draw_chat_area(f: &mut Frame, app: &mut App, area: Rect) {
     
     let viewport_height = inner.height as usize;
     
+    // Update the app's viewport height for consistent scrolling calculations
+    app.update_viewport_height(viewport_height);
+    
     let mut lines = Vec::new();
     
     if app.current_channel.is_some() {
+        // Only update autoscroll status if we didn't just process new messages
+        // This prevents the UI from disabling autoscroll right after on_tick() enabled it
+        if !app.just_processed_messages {
+            app.update_autoscroll_status_with_height(viewport_height);
+        }
+        
+        // If autoscroll is enabled, ensure we're scrolled to bottom for current viewport
+        if app.should_autoscroll {
+            app.scroll_to_bottom_with_height(viewport_height);
+        }
+        
         // Show channel messages with automatic scroll handling
         let (visible_messages, effective_scroll_offset) = app.get_visible_messages(viewport_height);
         
-        // Always update the app's scroll offset to match what's being displayed
-        app.update_scroll_offset(effective_scroll_offset);
-        
-        // Update autoscroll status with actual viewport height for better accuracy
-        app.update_autoscroll_status_with_height(viewport_height);
+        // Only update scroll offset if not in autoscroll mode to avoid overriding scroll_to_bottom()
+        if !app.should_autoscroll {
+            app.update_scroll_offset(effective_scroll_offset);
+        }
         
         for (timestamp, nickname, content, is_own, pubkey) in visible_messages {
             let nick_color = if is_own { 
@@ -339,9 +352,10 @@ fn draw_input_area(f: &mut Frame, app: &mut App, area: Rect) {
     // Calculate inner area before consuming input_block
     let inner_area = input_block.inner(area);
     
-    // Update scroll offset based on actual available width
+    // Update tracked input width and scroll offset based on actual available width
+    app.input_width = inner_area.width as usize;
     if app.input_mode == InputMode::Editing {
-        app.update_input_scroll_with_width(inner_area.width as usize);
+        app.update_input_scroll_with_width(app.input_width);
     }
     
     let input_text = if app.input_mode == InputMode::Editing {

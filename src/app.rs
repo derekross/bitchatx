@@ -302,6 +302,15 @@ pub struct App {
     
     // Clickable regions for nostr URIs
     pub clickable_regions: Vec<ClickableRegion>,
+    
+    // Track actual viewport height for proper scrolling
+    pub viewport_height: usize,
+    
+    // Track actual input width for proper horizontal scrolling
+    pub input_width: usize,
+    
+    // Flag to prevent UI from overriding autoscroll after new messages
+    pub just_processed_messages: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -365,6 +374,9 @@ impl App {
             private_chats: HashMap::new(),
             spam_filter: SpamFilter::new(),
             clickable_regions: Vec::new(),
+            viewport_height: 25, // Default fallback, will be updated by UI
+            input_width: 80, // Default fallback, will be updated by UI
+            just_processed_messages: false,
         };
         
         // Add welcome message to system channel
@@ -795,8 +807,8 @@ impl App {
         
         self.add_status_message(format!("Joined channel #{}", geohash));
         
-        // Enable auto-scrolling when joining a channel
-        self.should_autoscroll = true;
+        // Force scroll to bottom when joining a channel
+        self.force_scroll_to_bottom();
         
         Ok(())
     }
@@ -1128,13 +1140,11 @@ impl App {
         
         // Auto-scroll to bottom if we received new messages
         if new_messages_count > 0 {
-            // Check if we should re-enable autoscroll for new messages
-            self.update_autoscroll_status_with_height(25); // Use reasonable default height
-            
-            // If we're in autoscroll mode, ensure we scroll to bottom immediately
-            if self.should_autoscroll {
-                self.scroll_to_bottom();
-            }
+            // For new messages, completely reset scrolling state to ensure visibility
+            self.force_scroll_to_bottom();
+            self.just_processed_messages = true;
+        } else {
+            self.just_processed_messages = false;
         }
         
         // Process status updates
@@ -1184,6 +1194,9 @@ impl App {
                 let next_index = (current_index + 1) % all_channels.len();
                 self.current_channel = Some(all_channels[next_index].clone());
                 
+                // Force scroll to bottom when switching channels
+                self.force_scroll_to_bottom();
+                
                 // Add status message about channel switch
                 let new_channel = &all_channels[next_index];
                 if new_channel == "system" {
@@ -1195,6 +1208,7 @@ impl App {
         } else {
             // If no current channel, switch to first channel (system)
             self.current_channel = Some(all_channels[0].clone());
+            self.force_scroll_to_bottom();
             self.add_status_message("Switched to system channel".to_string());
         }
     }
@@ -1623,8 +1637,7 @@ impl App {
     }
     
     fn scroll_to_bottom(&mut self) {
-        // This will be called with the actual viewport height from the UI
-        self.scroll_to_bottom_with_height(25); // Default fallback
+        self.scroll_to_bottom_with_height(self.viewport_height);
     }
     
     pub fn scroll_to_bottom_with_height(&mut self, viewport_height: usize) {
@@ -1645,8 +1658,18 @@ impl App {
         self.scroll_offset = new_offset;
     }
     
+    pub fn update_viewport_height(&mut self, height: usize) {
+        self.viewport_height = height;
+    }
+    
+    pub fn force_scroll_to_bottom(&mut self) {
+        // Reset scroll state completely to ensure clean scrolling
+        self.should_autoscroll = true;
+        self.scroll_to_bottom_with_height(self.viewport_height);
+    }
+    
     fn update_autoscroll_status(&mut self) {
-        self.update_autoscroll_status_with_height(25); // Default fallback
+        self.update_autoscroll_status_with_height(self.viewport_height);
     }
     
     pub fn update_autoscroll_status_with_height(&mut self, viewport_height: usize) {
@@ -1986,19 +2009,19 @@ impl App {
     
     /// Update input horizontal scroll to keep cursor visible with a specific width
     pub fn update_input_scroll_with_width(&mut self, available_width: usize) {
-        if available_width <= 1 {
+        if available_width <= 2 {
             self.input_horizontal_scroll = 0;
             return;
         }
         
-        // Keep cursor within the visible area with some buffer
-        let visible_width = available_width.saturating_sub(1); // Account for cursor
+        // Leave space for cursor (1 char) but be less conservative than before
+        let usable_width = available_width.saturating_sub(1);
         
-        // If cursor is beyond the right edge of visible area, scroll right
-        if self.cursor_position >= self.input_horizontal_scroll + visible_width {
-            self.input_horizontal_scroll = self.cursor_position.saturating_sub(visible_width) + 1;
+        // If cursor is beyond the usable area, scroll right to keep it visible
+        if self.cursor_position >= self.input_horizontal_scroll + usable_width {
+            self.input_horizontal_scroll = self.cursor_position.saturating_sub(usable_width) + 1;
         }
-        // If cursor is before the left edge of visible area, scroll left
+        // If cursor is before the left edge, scroll left
         else if self.cursor_position < self.input_horizontal_scroll {
             self.input_horizontal_scroll = self.cursor_position;
         }
@@ -2006,7 +2029,8 @@ impl App {
     
     /// Update input horizontal scroll to keep cursor visible (fallback with estimate)
     fn update_input_scroll(&mut self) {
-        self.update_input_scroll_with_width(80); // Conservative fallback estimate
+        // Use the tracked input width for accurate scrolling
+        self.update_input_scroll_with_width(self.input_width);
     }
     
     fn list_auto_muted_users(&mut self) {
